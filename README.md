@@ -1,0 +1,96 @@
+# Playlist Sync
+
+A small self-hosted web app that keeps **YouTube Music playlists** in sync with
+**Lidarr** (downloads the albums and singles) and **Jellyfin** (a playlist with the same tracks),
+and refreshes every playlist on a schedule. It replaces the old `ytm_sync.py` script; the
+matching logic is the same, now with a UI, run history and a background scheduler.
+
+* FastHTML + htmx UI styled with Pico CSS, stdlib SQLite, one Python process, no external services or CDNs
+  (htmx and Pico are vendored in `app/static`).
+* Single user, protected by one password.
+
+## Quick start
+
+```bash
+cp .env.example .env          # set APP_PASSWORD (and TZ)
+docker compose up -d --build
+```
+
+Open <http://your-server:5001>, sign in, open **Settings**, enter the Lidarr and Jellyfin URL and API key
+(use *Test connection*), then paste a playlist link on the dashboard. The first sync starts immediately.
+
+`LIDARR_*`, `JELLYFIN_*` and `DEFAULT_INTERVAL_HOURS` in `.env` only pre-fill Settings on the very first
+start; afterwards the values saved in the UI are used. Data (database, login secret, optional YouTube
+login, cached playlist/track artwork) lives in `./data`, mounted at `/data`. The container starts as root only to fix the ownership of
+`/data` and then runs the app as an unprivileged user.
+
+Without Docker: `pip install -r requirements.txt`, then
+`APP_PASSWORD=... uvicorn app.main:app --port 5001` (keep a single worker: the sync thread must exist once).
+Tests: `pip install -r requirements-dev.txt && python -m pytest -q`.
+The old CLI still works: `python -m app.engine "<playlist url>" --dry-run` (settings from env vars).
+
+## Code layout
+
+```
+app/
+  main.py        FastHTML app setup: headers, auth Beforeware, toasts, static files, registers the routers
+  config.py      constants and small input helpers shared by the routes
+  routes/        HTTP handlers, one APIRouter per area (auth, playlists, settings, art)
+  ui/            FastHTML components: core.py = shared building blocks (layout, buttons, badges, fields),
+                 one module per area for the page-specific parts
+  db.py          SQLite persistence
+  worker.py      background scheduler thread
+  engine.py      the sync itself (YouTube Music -> Lidarr / Jellyfin), no web or database code
+  static/        htmx, Pico CSS, app.css (only what Pico lacks), favicon
+```
+
+The UI is plain FastHTML + htmx without custom JavaScript: messages are FastHTML toasts (`add_toast`, which
+also survive redirects), live views poll with `hx-trigger="every Ns"` and the server answers HTTP 286 to stop
+polling, and responses send `HX-Trigger: playlists-changed` to refresh the library and sidebar.
+Artwork from YouTube Music is fetched by the server (`/art/...`, allow-listed Google image hosts only) and
+cached in `data/art`, so the browser never loads anything from external hosts.
+
+## How matching works
+
+* Each YouTube Music track is looked up in Lidarr by album (and artist); when that fails, by song title,
+  and as a last resort MusicBrainz is searched. Titles are normalised first (edition, remaster and
+  similar noise is stripped).
+* Candidates are scored by title and artist similarity; a result with the wrong artist is rejected
+  instead of downloading a random album.
+* Tracks of the same album are grouped: the album is added to Lidarr once, monitored and a search is
+  triggered. Lidarr first has to import new artists, so the app waits (default 20 minutes) before monitoring.
+* In Jellyfin each track is matched against the library of the configured user (title + artist + album).
+  Only tracks that are already in the library are added, in playlist order.
+* The Jellyfin playlist is **append-only**: tracks are added, never removed or reordered, so edits you make
+  in Jellyfin are kept. Re-running a sync after Lidarr has finished downloading picks up the new files.
+
+## Lidarr and Jellyfin notes
+
+* The Lidarr **metadata profile** must allow **Singles** and **EPs**, otherwise tracks that only exist as
+  singles can't be added.
+* Lidarr's **root folder must be the folder your Jellyfin music library points to**.
+* To see new downloads in Jellyfin quickly, enable real-time monitoring on the Jellyfin music library, or use
+  Lidarr, Settings, Connect, Jellyfin/Emby to trigger library updates.
+* The Jellyfin API key is created in Jellyfin under Dashboard, API Keys; the Lidarr key under
+  Settings, General, Security.
+
+## Private playlists
+
+Public and unlisted playlists and auto-generated mixes need no login. For private playlists or Liked Music,
+open Settings, YouTube Music login and paste the request headers of an authenticated request to
+`music.youtube.com` (browser developer tools, Network tab, any `/browse` request, copy the request headers).
+They are stored in `/data/browser.json` and only used by this server. Remove them from the same page.
+The headers expire when you sign out of YouTube in that browser; paste fresh ones if private playlists
+start failing. Public playlists and mixes keep syncing without the login if it expires (the run log says so).
+
+## Limitations
+
+* Mixes (`RD...` playlists, e.g. "Workout Supermix") change over time and may be personalised to the
+  account that opened them; each sync reads the current contents. Tracks that disappear from a mix stay in
+  the Jellyfin playlist because it is append-only.
+* Tracks that are not on MusicBrainz / in Lidarr's metadata can't be downloaded automatically and show up
+  under "Not found in Lidarr"; add those manually.
+* Matching is heuristic. Remixes, live versions and very generic titles can occasionally pick the wrong release.
+* Deleting a playlist in the app removes only its records here, not the Jellyfin playlist or Lidarr albums.
+* There is one password and no CSRF tokens (the session cookie is `SameSite=Lax`); put the app behind your
+  LAN/VPN or a reverse proxy with HTTPS.

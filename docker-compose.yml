@@ -1,0 +1,12 @@
+services:
+  playlist-sync:
+    build: .
+    image: playlist-sync:latest
+    container_name: playlist-sync
+    ports:
+      - "5001:5001"
+    volumes:
+      - ./data:/data
+    env_file:
+      - .env
+    restart: unless-stopped

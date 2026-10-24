@@ -1,0 +1,4 @@
+python-fasthtml==0.14.14
+ytmusicapi==1.12.3
+requests==2.34.2
+uvicorn==0.54.0
