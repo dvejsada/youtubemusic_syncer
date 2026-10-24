@@ -13,8 +13,10 @@ matching logic is the same, now with a UI, run history and a background schedule
 
 ```bash
 cp .env.example .env          # set APP_PASSWORD (and TZ)
-docker compose up -d --build
+docker compose up -d           # pulls georgx22/youtubesync:latest
 ```
+
+To build the image yourself instead: `docker build -t georgx22/youtubesync:latest .` before `docker compose up -d`.
 
 Open <http://your-server:5001>, sign in, open **Settings**, enter the Lidarr and Jellyfin URL and API key
 (use *Test connection*), then paste a playlist link on the dashboard. The first sync starts immediately.

@@ -1,7 +1,6 @@
 services:
   playlist-sync:
-    build: .
-    image: playlist-sync:latest
+    image: georgx22/youtubesync:latest
     container_name: playlist-sync
     ports:
       - "5001:5001"
