@@ -103,6 +103,9 @@ cached in `data/art`, so the browser never loads anything from external hosts.
   of a burst (one more try ten minutes later if that update found nothing new, e.g. Jellyfin hadn't scanned the
   files yet), instead of waiting for the next scheduled sync. The password may also be sent as `?token=` in
   the URL, but then it shows up in access logs. *New password* replaces it.
+* Playlists are created through the Jellyfin API and stored by Jellyfin itself. Once any playlist exists,
+  Jellyfin shows its built-in **Playlists** view on the home screen next to your libraries. It is not a real
+  library, so it isn't listed under Dashboard, Libraries, and the app never writes playlist files to disk.
 
 ## Private playlists
 
