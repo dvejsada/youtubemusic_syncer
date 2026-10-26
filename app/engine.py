@@ -67,8 +67,9 @@ class TrackResult:
     lidarr_status: str = "pending"    # added | monitored | downloaded | duplicate | not_found | error | skipped
     lidarr_release: str = ""          # e.g. "Calvin Harris - Motion [Album]"
     lidarr_note: str = ""             # e.g. "via MusicBrainz", error text
-    jellyfin_status: str = "pending"  # in_playlist | added | missing | skipped
+    jellyfin_status: str = "pending"  # in_playlist | added | duplicate | missing | not_added | skipped
     jellyfin_item_id: str = ""
+    jellyfin_note: str = ""           # e.g. "same song as #3"
     thumb_url: str = ""               # YouTube Music thumbnail (source URL, served through /art)
 
 
@@ -79,8 +80,9 @@ class SyncResult:
     tracks: list[TrackResult]
     lidarr_found: int = 0
     lidarr_failed: int = 0
-    jellyfin_matched: int = 0
+    jellyfin_matched: int = 0        # unique songs in the Jellyfin playlist
     jellyfin_added: int = 0
+    jellyfin_duplicates: int = 0     # tracks that are the same Jellyfin song as an earlier track
     jellyfin_playlist_id: str = ""
     errors: list[str] = field(default_factory=list)
     status: str = "ok"               # ok | warning (some not found / missing) | error
@@ -818,8 +820,10 @@ class Jellyfin:
         return r.json() if r.text else {}
 
     def find_track(self, t):
+        """Best library item for the track, or None. Like Lidarr.lookup, the title and the artist have to
+        match well on their own: a different song by the same artist, or a cover of the same song, is no match."""
         title = t["title"]
-        artist = t["artists"][0] if t["artists"] else ""
+        artists = [a for a in t["artists"] if a]
         queries = [title]
         cleaned = NOISE.sub("", DASH_SUFFIX.sub("", title)).strip()
         if cleaned and cleaned != title:
@@ -832,8 +836,11 @@ class Jellyfin:
             }).get("Items", [])
             for it in items:
                 arts = (it.get("Artists") or []) + [it.get("AlbumArtist") or ""]
-                a_score = max([sim(a, artist) for a in arts if a] or [0])
-                s = sim(it.get("Name", ""), title) * 0.6 + a_score * 0.3
+                t_sim = sim(it.get("Name", ""), title)
+                a_score = max([sim(a, b) for a in arts if a for b in artists] or [0])
+                if t_sim < 0.85 or a_score < 0.8:
+                    continue
+                s = t_sim * 0.6 + a_score * 0.3
                 if t["album"] and it.get("Album"):
                     s += sim(it["Album"], t["album"]) * 0.1
                 else:
@@ -844,30 +851,42 @@ class Jellyfin:
                 break
         return best if score >= 0.75 else None
 
+    def playlist_item_ids(self, playlist_id) -> set:
+        return {i["Id"] for i in self.req("GET", f"/Playlists/{playlist_id}/Items",
+                                          params={"userId": self.uid}).get("Items", [])}
+
     def ensure_playlist(self, name, ids):
-        """Append-only. Returns (message, playlist_id, new_ids) where new_ids are the items
-        that were (or, in dry-run, would be) added."""
+        """Append-only. Returns (message, playlist_id, new_ids, lost_ids): new_ids are the items that were
+        (or, in dry-run, would be) added; lost_ids were sent but are not in the playlist when it is read back."""
         pls = self.req("GET", "/Items", params={
             "userId": self.uid, "includeItemTypes": "Playlist", "recursive": "true", "searchTerm": name,
         }).get("Items", [])
         pl = next((p for p in pls if p["Name"] == name), None)
         if not pl:
             if self.dry:
-                return f"would create playlist '{name}' with {len(ids)} tracks", "", list(ids)
+                return f"would create playlist '{name}' with {len(ids)} tracks", "", list(ids), []
             res = self.req("POST", "/Playlists", json={
                 "Name": name, "Ids": ids, "UserId": self.uid, "MediaType": "Audio",
             })
-            return (f"created playlist '{name}' with {len(ids)} tracks (id {res.get('Id')})",
-                    res.get("Id") or "", list(ids))
-        present = {i["Id"] for i in self.req("GET", f"/Playlists/{pl['Id']}/Items",
-                                             params={"userId": self.uid}).get("Items", [])}
-        new = [i for i in ids if i not in present]
-        if new and not self.dry:
-            for k in range(0, len(new), 50):
-                self.req("POST", f"/Playlists/{pl['Id']}/Items",
-                         params={"ids": ",".join(new[k:k + 50]), "userId": self.uid})
-        verb = "would add" if self.dry else "added"
-        return f"playlist '{name}' exists: {verb} {len(new)} new track(s)", pl["Id"], new
+            pl_id, new = res.get("Id") or "", list(ids)
+            msg = f"created playlist '{name}' with {len(ids)} tracks (id {res.get('Id')})"
+        else:
+            pl_id = pl["Id"]
+            present = self.playlist_item_ids(pl_id)
+            new = [i for i in ids if i not in present]
+            if new and not self.dry:
+                for k in range(0, len(new), 50):
+                    self.req("POST", f"/Playlists/{pl_id}/Items",
+                             params={"ids": ",".join(new[k:k + 50]), "userId": self.uid})
+            verb = "would add" if self.dry else "added"
+            msg = f"playlist '{name}' exists: {verb} {len(new)} new track(s)"
+        lost = []
+        if new and pl_id and not self.dry:
+            # Jellyfin can answer a write with success and still not keep the items: check
+            present = self.playlist_item_ids(pl_id)
+            lost = [i for i in new if i not in present]
+            new = [i for i in new if i in present]
+        return msg, pl_id, new, lost
 
 
 def _sync_jellyfin(jf: Jellyfin, name: str, tracks: list[dict], results: list[TrackResult],
@@ -877,6 +896,8 @@ def _sync_jellyfin(jf: Jellyfin, name: str, tracks: list[dict], results: list[Tr
     log(f"== Jellyfin: matching {len(tracks)} tracks ==")
     ids, missing = [], []
     matched: list[tuple[TrackResult, str]] = []
+    duplicates: list[TrackResult] = []
+    first_pos: dict[str, int] = {}  # Jellyfin item id -> position of the first track matched to it
     consecutive_errors = 0
     for i, (t, tr) in enumerate(zip(tracks, results)):
         if should_stop():
@@ -897,29 +918,45 @@ def _sync_jellyfin(jf: Jellyfin, name: str, tracks: list[dict], results: list[Tr
             tr.jellyfin_status = "missing"
             missing.append(t)
             continue
-        if it:
-            matched.append((tr, it["Id"]))
-            tr.jellyfin_item_id = it["Id"]
-        if it and it["Id"] not in ids:
-            ids.append(it["Id"])
-        elif not it:
+        if not it:
             tr.jellyfin_status = "missing"
             missing.append(t)
+            continue
+        tr.jellyfin_item_id = it["Id"]
+        if it["Id"] in first_pos:
+            # the playlist holds each song once: this track is not counted as a song of its own
+            tr.jellyfin_status = "duplicate"
+            tr.jellyfin_note = f"same song as #{first_pos[it['Id']]}"
+            duplicates.append(tr)
+            continue
+        first_pos[it["Id"]] = tr.position
+        ids.append(it["Id"])
+        matched.append((tr, it["Id"]))
     log(f"  matched {len(ids)}/{len(tracks)}")
+    if duplicates:
+        log(f"  {len(duplicates)} track(s) are the same Jellyfin song as an earlier track (added once):")
+        for tr in duplicates:
+            log(f"    = #{tr.position} {', '.join(tr.artists)} - {tr.title}  ({tr.jellyfin_note})")
     playlist_id = ""
     if ids:
         try:
-            msg, playlist_id, new_ids = jf.ensure_playlist(name, ids)
+            msg, playlist_id, new_ids, lost_ids = jf.ensure_playlist(name, ids)
             log("  " + msg)
         except Exception as e:
             errors.append("Jellyfin playlist update failed: " + redact(e))
             log(f"  !  playlist update failed: {redact(e)}")
-            for tr, _ in matched:
+            for tr in [tr for tr, _ in matched] + duplicates:
                 tr.jellyfin_status = "skipped"
             return ""
-        new = set(new_ids)
+        new, lost = set(new_ids), set(lost_ids)
         for tr, item_id in matched:
-            tr.jellyfin_status = "added" if item_id in new else "in_playlist"
+            tr.jellyfin_status = "not_added" if item_id in lost else "added" if item_id in new else "in_playlist"
+        if lost:
+            errors.append(f"Jellyfin accepted {len(lost)} track(s) for playlist '{name}' but did not keep them")
+            log(f"  !  {len(lost)} track(s) are not in the playlist after adding them:")
+            for tr, item_id in matched:
+                if item_id in lost:
+                    log(f"    - #{tr.position} {', '.join(tr.artists)} - {tr.title}")
     if missing:
         log(f"  not in library yet ({len(missing)}) - will be appended on a later sync once Lidarr has them:")
         for t in missing:
@@ -986,6 +1023,7 @@ def sync_playlist(settings: Settings, ref: str, *, jellyfin_name: str | None = N
     res.lidarr_failed = sum(tr.lidarr_status in ("not_found", "error") for tr in results)
     res.jellyfin_matched = sum(tr.jellyfin_status in ("in_playlist", "added") for tr in results)
     res.jellyfin_added = len({tr.jellyfin_item_id for tr in results if tr.jellyfin_status == "added"})
+    res.jellyfin_duplicates = sum(tr.jellyfin_status == "duplicate" for tr in results)
     res.stopped = stopped
     if stopped:
         res.errors.append("Stopped before completion.")

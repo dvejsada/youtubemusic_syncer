@@ -257,6 +257,7 @@ class MockJellyfin(_Server):
         self.playlists: dict[str, dict] = {}
         self.fail_items = False       # make /Items answer 500
         self.fail_playlist_writes = False   # make POST /Playlists... answer 500
+        self.drop_playlist_appends = False  # answer POST /Playlists/{id}/Items with 204 but keep nothing
         self._n = 0
 
     def add_item(self, item_id, name, artist, album=None):
@@ -294,7 +295,8 @@ class MockJellyfin(_Server):
             if method == "GET":
                 return 200, {"Items": [{"Id": i} for i in pl["items"]]}
             if method == "POST":
-                pl["items"] += [i for i in q.get("ids", "").split(",") if i]
+                if not self.drop_playlist_appends:
+                    pl["items"] += [i for i in q.get("ids", "").split(",") if i]
                 return 204, {}
         return 404, {}
 

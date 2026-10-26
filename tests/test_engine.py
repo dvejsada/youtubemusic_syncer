@@ -512,6 +512,57 @@ class TestFullSync:
         assert LK not in "\n".join(lines)
 
 
+class TestJellyfinMatching:
+    def tracks(self, env, *tracks):
+        env.ytm.playlists["PLtest"]["tracks"] = list(tracks)
+
+    def test_different_song_by_the_same_artist_is_no_match(self, env):
+        env.jf.add_item("j-again", "Outside Again", "Calvin Harris", "Other")
+        self.tracks(env, yt_track("Outside", ["Calvin Harris"]))
+        res, _ = run(env, do_lidarr=False)
+        assert res.tracks[0].jellyfin_status == "missing" and res.jellyfin_matched == 0
+
+    def test_cover_by_another_artist_is_no_match(self, env):
+        self.tracks(env, yt_track("Paranoid Android", ["Brad Mehldau"]))
+        res, _ = run(env, do_lidarr=False)
+        assert res.tracks[0].jellyfin_status == "missing"
+
+    def test_any_listed_artist_can_match(self, env):
+        env.jf.add_item("j-wfl", "We Found Love", "Calvin Harris", "Motion")
+        self.tracks(env, yt_track("We Found Love", ["Rihanna", "Calvin Harris"], "Motion"))
+        res, _ = run(env, do_lidarr=False)
+        assert res.tracks[0].jellyfin_item_id == "j-wfl" and res.tracks[0].jellyfin_status == "added"
+
+    def test_tracks_matching_the_same_song_count_once(self, env):
+        self.tracks(env, yt_track("Summer", ["Calvin Harris"], "Motion"),
+                    yt_track("Paranoid Android", ["Radiohead"], "OK Computer"),
+                    yt_track("Summer", ["Calvin Harris"]))
+        res, lines = run(env, do_lidarr=False)
+        s = {t.position: t for t in res.tracks}
+        assert env.jf.playlist_by_name("Road Trip")["items"] == ["j-summer", "j-pa"]
+        assert [s[i].jellyfin_status for i in (1, 2, 3)] == ["added", "added", "duplicate"]
+        assert s[3].jellyfin_note == "same song as #1" and s[3].jellyfin_item_id == "j-summer"
+        assert (res.jellyfin_matched, res.jellyfin_added, res.jellyfin_duplicates) == (2, 2, 1)
+        assert res.status == "ok"
+        assert "    = #3 Calvin Harris - Summer  (same song as #1)" in lines
+
+        res2, _ = run(env, do_lidarr=False)  # still a duplicate once the song is in the playlist
+        assert [t.jellyfin_status for t in res2.tracks] == ["in_playlist", "in_playlist", "duplicate"]
+        assert (res2.jellyfin_matched, res2.jellyfin_duplicates) == (2, 1)
+
+    def test_appends_jellyfin_does_not_keep_are_reported(self, env):
+        run(env, do_lidarr=False)
+        env.jf.add_item("j-out", "Outside", "Calvin Harris", "Motion")
+        env.jf.drop_playlist_appends = True
+        res, lines = run(env, do_lidarr=False)
+        s = {t.position: t for t in res.tracks}
+        assert s[2].jellyfin_status == "not_added" and s[1].jellyfin_status == "in_playlist"
+        assert (res.jellyfin_matched, res.jellyfin_added) == (2, 0)
+        assert res.status == "error"
+        assert res.errors == ["Jellyfin accepted 1 track(s) for playlist 'Road Trip' but did not keep them"]
+        assert "    - #2 Calvin Harris, Ellie Goulding - Outside" in lines
+
+
 class TestDryRun:
     def test_makes_no_write_calls(self, env):
         res, lines = run(env, dry_run=True)

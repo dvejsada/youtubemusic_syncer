@@ -61,8 +61,12 @@ cached in `data/art`, so the browser never loads anything from external hosts.
   instead of downloading a random album.
 * Tracks of the same album are grouped: the album is added to Lidarr once, monitored and a search is
   triggered. Lidarr first has to import new artists, so the app waits (default 20 minutes) before monitoring.
-* In Jellyfin each track is matched against the library of the configured user (title + artist + album).
-  Only tracks that are already in the library are added, in playlist order.
+* In Jellyfin each track is matched against the library of the configured user: the title and one of the
+  artists both have to match on their own (the album only breaks ties), so a different song by the same artist
+  or a cover by someone else is not taken. Only tracks that are already in the library are added, in playlist order.
+* A track that matches the same Jellyfin song as an earlier track shows as "Same song" and is counted once,
+  because the Jellyfin playlist holds each song once. After adding, the playlist is read back; tracks Jellyfin
+  did not keep show as "Not added" and the run fails.
 * The Jellyfin playlist is **append-only**: tracks are added, never removed or reordered, so edits you make
   in Jellyfin are kept. Re-running a sync after Lidarr has finished downloading picks up the new files.
 

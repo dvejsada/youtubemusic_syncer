@@ -681,6 +681,18 @@ class TestDetail:
         worker.run_pending_once()
         assert servers.jf.playlist_by_name("Custom Name") is not None
 
+    def test_a_repeated_song_counts_once(self, client):
+        pid = add_pl(queued=0, track_count=2, jellyfin_matched=1, jellyfin_duplicates=1)
+        db.replace_tracks(pid, [
+            engine.TrackResult(1, "Summer", ["Calvin Harris"], "Motion", jellyfin_status="in_playlist"),
+            engine.TrackResult(2, "Summer", ["Calvin Harris"], None, jellyfin_status="duplicate",
+                               jellyfin_note="same song as #1")])
+        assert db.track_stats(pid)["jf_ok"] == 1 and db.track_stats(pid)["jf_dup"] == 1
+        t = client.get(f"/playlists/{pid}").text
+        for text in ("Same song", "same song as #1", "repeat an earlier song", "<strong>1/1</strong>"):
+            assert text in t, text
+        assert "<strong>1/1</strong>" in client.get("/").text  # library card meter
+
 
 # ------------------------------------------------------------------ settings
 

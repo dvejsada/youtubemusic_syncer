@@ -33,6 +33,7 @@ PLAYLIST_COLUMNS = {
     "ref", "url", "name", "is_mix", "jellyfin_name", "interval_hours", "enabled", "do_lidarr",
     "do_jellyfin", "queued", "last_run_at", "next_run_at", "last_status", "last_error",
     "track_count", "lidarr_found", "jellyfin_matched", "jellyfin_playlist_id", "cover_url",
+    "jellyfin_duplicates",
 }
 
 SCHEMA_V1 = """
@@ -91,7 +92,12 @@ ALTER TABLE playlists ADD COLUMN cover_url TEXT NOT NULL DEFAULT '';
 ALTER TABLE tracks ADD COLUMN thumb_url TEXT NOT NULL DEFAULT '';
 """
 
-MIGRATIONS = [SCHEMA_V1, SCHEMA_V2]  # index + 1 == user_version after applying
+SCHEMA_V3 = """
+ALTER TABLE playlists ADD COLUMN jellyfin_duplicates INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE tracks ADD COLUMN jellyfin_note TEXT NOT NULL DEFAULT '';
+"""
+
+MIGRATIONS = [SCHEMA_V1, SCHEMA_V2, SCHEMA_V3]  # index + 1 == user_version after applying
 
 _init_lock = threading.Lock()
 
@@ -318,7 +324,7 @@ def replace_tracks(pid: int, tracks) -> bool:
     ts = now_iso()
     rows = [(pid, t.position, t.title, json.dumps(list(t.artists), ensure_ascii=False), t.album,
              t.lidarr_status, t.lidarr_release, t.lidarr_note, t.jellyfin_status, ts,
-             getattr(t, "thumb_url", "") or "") for t in tracks]
+             getattr(t, "thumb_url", "") or "", getattr(t, "jellyfin_note", "") or "") for t in tracks]
     with connect() as c:
         c.execute("BEGIN IMMEDIATE")
         if not c.execute("SELECT 1 FROM playlists WHERE id=?", (pid,)).fetchone():
@@ -327,8 +333,8 @@ def replace_tracks(pid: int, tracks) -> bool:
         c.execute("DELETE FROM tracks WHERE playlist_id=?", (pid,))
         c.executemany(
             "INSERT INTO tracks(playlist_id, position, title, artists, album, lidarr_status,"
-            " lidarr_release, lidarr_note, jellyfin_status, updated_at, thumb_url)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?)", rows)
+            " lidarr_release, lidarr_note, jellyfin_status, updated_at, thumb_url, jellyfin_note)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", rows)
         c.execute("COMMIT")
     return True
 
@@ -368,7 +374,8 @@ def track_stats(pid: int) -> dict:
             " SUM(lidarr_status IN ('added','monitored','downloaded','duplicate')) AS lidarr_ok,"
             " SUM(lidarr_status IN ('not_found','error')) AS lidarr_missing,"
             " SUM(jellyfin_status IN ('in_playlist','added')) AS jf_ok,"
-            " SUM(jellyfin_status='missing') AS jf_missing"
+            " SUM(jellyfin_status='missing') AS jf_missing,"
+            " SUM(jellyfin_status='duplicate') AS jf_dup"
             " FROM tracks WHERE playlist_id=?", (pid,)).fetchone()
     return {k: (r[k] or 0) for k in r.keys()}
 

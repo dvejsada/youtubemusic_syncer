@@ -182,14 +182,15 @@ def _record(pid, pl, run_id, result, error, sink) -> str:
         summary = {
             "tracks": len(result.tracks), "lidarr_found": result.lidarr_found,
             "lidarr_failed": result.lidarr_failed, "jellyfin_matched": result.jellyfin_matched,
-            "jellyfin_added": result.jellyfin_added, "errors": result.errors,
+            "jellyfin_added": result.jellyfin_added, "jellyfin_duplicates": result.jellyfin_duplicates,
+            "errors": result.errors,
         }
         if db.get_playlist(pid) and db.replace_tracks(pid, result.tracks):
             db.update_playlist(
                 pid, name=result.playlist_name or pl["name"], is_mix=int(result.is_mix),
                 track_count=len(result.tracks), cover_url=result.cover_url or pl["cover_url"] or "",
                 lidarr_found=result.lidarr_found,
-                jellyfin_matched=result.jellyfin_matched,
+                jellyfin_matched=result.jellyfin_matched, jellyfin_duplicates=result.jellyfin_duplicates,
                 jellyfin_playlist_id=result.jellyfin_playlist_id or pl["jellyfin_playlist_id"] or "")
     else:
         summary = {"errors": [error]}

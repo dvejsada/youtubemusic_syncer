@@ -94,7 +94,8 @@ def playlist_card(pl: dict, running_id: int | None, queue: list[int]):
             Small(error, cls="pl-error" + (" warn" if key == "warning" else ""), title=error) if error else None,
             cls="pc-text"),
         Div(progress("Lidarr", pl["lidarr_found"], total, bool(pl["do_lidarr"])),
-            progress("Jellyfin", pl["jellyfin_matched"], total, bool(pl["do_jellyfin"])), cls="pc-meters"),
+            progress("Jellyfin", pl["jellyfin_matched"], total - (pl["jellyfin_duplicates"] or 0),
+                     bool(pl["do_jellyfin"])), cls="pc-meters"),
         id=f"pl-{pid}", cls="pcard", data_state=key,
         **(poll(f"/ui/playlists/{pid}/row") if is_active(state) else {}))
 
@@ -168,7 +169,8 @@ LIDARR_BADGES = {
 }
 JELLYFIN_BADGES = {
     "in_playlist": ("ok", "In playlist", "check_circle"), "added": ("ok", "Added", "check_circle"),
-    "missing": ("warn", "Not in library", "warning"), "skipped": ("neutral", "Skipped", "minus"),
+    "duplicate": ("neutral", "Same song", "minus"), "missing": ("warn", "Not in library", "warning"),
+    "not_added": ("err", "Not added", "x_circle"), "skipped": ("neutral", "Skipped", "minus"),
     "pending": ("neutral", "Pending", "clock"),
 }
 LIDARR_MISSING = ("not_found", "error")
@@ -185,6 +187,7 @@ def hero_backdrop(pl: dict):
 
 def detail_head(pl: dict, stats: dict, state):
     pid, total = pl["id"], pl["track_count"] or 0
+    songs = total - stats["jf_dup"]  # a track that repeats an earlier song is in the playlist once
     active = is_active(state)
     lid_on, jf_on = bool(pl["do_lidarr"]), bool(pl["do_jellyfin"])
     err = pl.get("last_error")
@@ -210,9 +213,10 @@ def detail_head(pl: dict, stats: dict, state):
             Div(figure(total, "tracks"),
                 figure(f"{stats['lidarr_ok']}/{total}" if lid_on else "-", "in Lidarr" if lid_on else "Lidarr is off",
                        "ok" if lid_on and total and stats["lidarr_ok"] == total else ""),
-                figure(f"{stats['jf_ok']}/{total}" if jf_on else "-",
+                figure(f"{stats['jf_ok']}/{songs}" if jf_on else "-",
                        "in Jellyfin playlist" if jf_on else "Jellyfin is off",
-                       "ok" if jf_on and total and stats["jf_ok"] == total else ""),
+                       "ok" if jf_on and songs and stats["jf_ok"] == songs else ""),
+                figure(stats["jf_dup"], "repeat an earlier song") if jf_on and stats["jf_dup"] else None,
                 figure(stats["lidarr_missing"], "not found", "warn") if lid_on and stats["lidarr_missing"] else None,
                 figure(stats["jf_missing"], "not in Jellyfin library", "warn")
                 if jf_on and stats["jf_missing"] else None,
@@ -233,11 +237,11 @@ def tabs(pid: int, current: str, counts: dict):
                role="navigation", aria_label="Playlist sections")
 
 
-def _status_cell(table: dict, status: str, release: str = "", note: str = ""):
+def _status_cell(table: dict, status: str, release: str = "", note: str = "", noted=LIDARR_MISSING):
     tone, label, ico = table.get(status, ("neutral", status or "-", "minus"))
     detail = " · ".join(x for x in (release, note) if x)
     return Div(badge(tone, label, ico, compact=True, title=f"{label}: {detail}" if detail else label),
-               Small(note, cls="trk-note", title=note) if note and status in LIDARR_MISSING else None,
+               Small(note, cls="trk-note", title=note) if note and status in noted else None,
                cls="trk-status")
 
 
@@ -256,7 +260,8 @@ def tracks_panel(pid: int, tracks: list[dict], flt: str):
                     cls="trk-main"),
                 Span(t["album"] or "", cls="trk-album"),
                 _status_cell(LIDARR_BADGES, t["lidarr_status"], t["lidarr_release"], t["lidarr_note"]),
-                _status_cell(JELLYFIN_BADGES, t["jellyfin_status"]), cls="trk")
+                _status_cell(JELLYFIN_BADGES, t["jellyfin_status"], note=t["jellyfin_note"], noted=("duplicate",)),
+                cls="trk")
             for t in shown] or [Div("Nothing matches this filter.", cls="center muted pad")]
     head = Div(Span("#", cls="trk-n"), Span(), Span("Title"), Span("Album", cls="trk-album"), Span("Lidarr"),
                Span("Jellyfin"), cls="trk trk-head")
@@ -294,6 +299,8 @@ def run_summary_text(run: dict) -> str:
     parts = [f"{s['tracks']} tracks", f"Lidarr {s.get('lidarr_found', 0)}", f"Jellyfin {s.get('jellyfin_matched', 0)}"]
     if s.get("jellyfin_added"):
         parts.append(f"{s['jellyfin_added']} added to playlist")
+    if s.get("jellyfin_duplicates"):
+        parts.append(f"{s['jellyfin_duplicates']} repeat an earlier song")
     if s.get("lidarr_failed"):
         parts.append(f"{s['lidarr_failed']} not found")
     return " · ".join(parts)
