@@ -12,11 +12,9 @@ from pathlib import Path
 
 from fasthtml.common import Beforeware, Link, Meta, Redirect, Script, fast_app, setup_toasts
 from starlette.responses import FileResponse, PlainTextResponse
-
-from app import security
 from starlette.staticfiles import StaticFiles
 
-from app import db, worker
+from app import db, security, worker
 from app.config import SESSION_DAYS
 from app.routes import routers
 from app.ui.core import APP_NAME

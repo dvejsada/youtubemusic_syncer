@@ -8,11 +8,13 @@ another site (curl, Lidarr's webhook) and pass.
 Reverse-proxy sign-in (optional): with AUTH_HEADER (e.g. Remote-User, set by Authelia / Authentik / oauth2-proxy)
 and TRUSTED_PROXIES (comma-separated addresses or networks of the proxy), a request from such an address that
 carries the header counts as signed in. The header is ignored from any other address, so it can't be forged by
-talking to the app directly. The address is the one uvicorn sees (the proxy's, unless uvicorn itself is told to
-trust forwarded headers).
+talking to the app directly. That relies on the address being the real peer of the connection: uvicorn must not
+rewrite it from X-Forwarded-For (run it with --no-proxy-headers, as the Docker image does). With
+FORWARDED_ALLOW_IPS set, which tells uvicorn to trust those headers, proxy sign-in stays off.
 """
 from __future__ import annotations
 
+import functools
 import ipaddress
 import logging
 import os
@@ -35,21 +37,44 @@ def is_cross_site(req) -> bool:
         return False  # not a browser form on another site
     if origin == "null":
         return True
-    hosts = {h.strip().lower() for h in (req.headers.get("host", ""), req.headers.get("x-forwarded-host", ""))
-             if h.strip()}
+    forwarded = req.headers.get("x-forwarded-host", "").split(",")  # chained proxies list several
+    hosts = {h.strip().lower() for h in (req.headers.get("host", ""), *forwarded) if h.strip()}
     return urlsplit(origin).netloc.lower() not in hosts
 
 
-def _proxy_config() -> tuple[str, list]:
-    header = os.environ.get("AUTH_HEADER", "").strip()
+def _proxy_config() -> tuple[str, tuple]:
+    return _parse_proxy_config(os.environ.get("AUTH_HEADER", ""), os.environ.get("TRUSTED_PROXIES", ""),
+                               os.environ.get("FORWARDED_ALLOW_IPS", ""))
+
+
+@functools.lru_cache(maxsize=8)  # parsed (and complained about) once per value, not on every request
+def _parse_proxy_config(header: str, proxies: str, forwarded_allow: str) -> tuple[str, tuple]:
+    header = header.strip()
+    if not header or not proxies.strip():
+        return "", ()
+    if forwarded_allow.strip():
+        log.error("Proxy sign-in is off: FORWARDED_ALLOW_IPS is set, so uvicorn may replace the client address "
+                  "with one taken from X-Forwarded-For and the trusted-proxy check could be forged.")
+        return "", ()
     nets = []
-    for part in os.environ.get("TRUSTED_PROXIES", "").split(","):
-        if part.strip():
-            try:
-                nets.append(ipaddress.ip_network(part.strip(), strict=False))
-            except ValueError:
-                log.warning("TRUSTED_PROXIES: ignoring %r (not an address or network)", part.strip())
-    return header, nets
+    for part in (p.strip() for p in proxies.split(",")):
+        if not part:
+            continue
+        try:
+            net = ipaddress.ip_network(part)  # strict: "10.1.2.3/8" is a typo, not 10.0.0.0/8
+        except ValueError:
+            log.warning("TRUSTED_PROXIES: ignoring %r (not an address or network; a network must be written "
+                        "with its first address, e.g. 10.0.0.0/8)", part)
+            continue
+        if net.prefixlen == 0:
+            log.warning("TRUSTED_PROXIES: ignoring %r: it would trust every address", part)
+            continue
+        if net.num_addresses > 1:
+            log.warning("TRUSTED_PROXIES: %r is a network: every host in it can sign in as anyone, including its "
+                        "gateway, which is where Docker's published ports can forward outside connections from. "
+                        "Prefer the proxy's own address.", part)
+        nets.append(net)
+    return header, tuple(nets)
 
 
 def proxy_auth_configured() -> bool:
@@ -66,6 +91,7 @@ def proxy_user(req) -> str:
         addr = ipaddress.ip_address(req.client.host)
     except ValueError:
         return ""
+    addr = getattr(addr, "ipv4_mapped", None) or addr  # ::ffff:10.0.0.5 when uvicorn listens on IPv6
     if not any(addr in net for net in nets):
         return ""
     return req.headers.get(header, "").strip()

@@ -35,5 +35,6 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
 
 # starts as root only to fix ownership of /data, then runs the app as user "app"
 ENTRYPOINT ["docker-entrypoint.sh"]
-# exactly one worker process: the sync worker thread must exist once
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "5001"]
+# exactly one worker process: the sync worker thread must exist once. --no-proxy-headers: the client address
+# must be the real peer (proxy sign-in trusts it, see app/security.py), never one taken from X-Forwarded-For
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "5001", "--no-proxy-headers"]

@@ -27,7 +27,8 @@ login, cached playlist/track artwork) lives in `./data`, mounted at `/data`. The
 `/data` and then runs the app as an unprivileged user.
 
 Without Docker (Python 3.13): `pip install -r requirements.txt`, then
-`APP_PASSWORD=... uvicorn app.main:app --port 5001` (keep a single worker: the sync thread must exist once).
+`APP_PASSWORD=... uvicorn app.main:app --port 5001 --no-proxy-headers` (keep a single worker: the sync thread
+must exist once; `--no-proxy-headers` keeps the client address real, which the proxy sign-in below relies on).
 Tests: `pip install -r requirements-dev.txt && python -m pytest -q`.
 The old CLI still works: `python -m app.engine "<playlist url>" --dry-run` (settings from env vars).
 
@@ -129,8 +130,19 @@ start failing. Public playlists and mixes keep syncing without the login if it e
 ## Signing in through a reverse proxy
 
 If a proxy such as Authelia, Authentik or oauth2-proxy already signs you in, set `AUTH_HEADER` to the header
-it passes the user name in (e.g. `Remote-User`) and `TRUSTED_PROXIES` to the proxy's address or network
-(e.g. `172.18.0.0/16`, comma-separated). A request from such an address that carries the header is signed in;
-the header is ignored from anywhere else, so it can't be forged by reaching the app directly. With both set,
-`APP_PASSWORD` may be left empty, and then the app can only be used through the proxy. The address checked is
-the one uvicorn sees, which is the proxy's own address in the usual Docker setup.
+it passes the user name in (e.g. `Remote-User`) and `TRUSTED_PROXIES` to the proxy's address (e.g.
+`172.18.0.5`; several comma-separated, networks like `10.0.0.0/24` work too). A request from such an address
+that carries the header is signed in; the header is ignored from anywhere else, so it can't be forged by
+reaching the app directly. With both set, `APP_PASSWORD` may be left empty, and then the app can only be used
+through the proxy.
+
+Get this right, because whoever can send that header from a trusted address is signed in:
+
+* Trust only the proxy. A whole Docker network (`172.18.0.0/16`) trusts every container on it, and with Docker
+  Desktop / rootless Docker even connections to the published port may arrive from the network's gateway. Give
+  the proxy a fixed address, or don't publish port 5001 and let only the proxy reach the app.
+* The proxy must set the header itself on every request and remove one sent by the browser (including on paths
+  it lets through without sign-in), and should only let in the users you want.
+* The address checked is the connection's real peer. The Docker image runs uvicorn with `--no-proxy-headers`
+  for that; don't set `FORWARDED_ALLOW_IPS` (proxy sign-in turns itself off if it is set). Run without Docker
+  with `--no-proxy-headers` too.

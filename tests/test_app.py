@@ -151,7 +151,8 @@ class TestCrossSiteRequests:
     def test_same_origin_and_headerless_posts_pass(self, client):
         pid = add_pl(queued=0)
         for headers in ({"Sec-Fetch-Site": "same-origin"}, {"Origin": "http://testserver"},
-                        {"Origin": "https://music.example", "X-Forwarded-Host": "music.example"}, {}):
+                        {"Origin": "https://music.example", "X-Forwarded-Host": "music.example"},
+                        {"Origin": "https://music.example", "X-Forwarded-Host": "music.example, inner.lan"}, {}):
             db.update_playlist(pid, queued=0)
             assert client.post(f"/playlists/{pid}/sync", headers=headers).status_code == 200, headers
             assert db.get_playlist(pid)["queued"] == 1
@@ -190,6 +191,29 @@ class TestProxySignIn:
     def test_off_without_both_settings(self, monkeypatch):
         monkeypatch.setenv("TRUSTED_PROXIES", "")
         assert self.via("10.1.2.3").get("/", headers={"Remote-User": "dan"}).status_code == 303
+
+    def test_forged_forwarded_for_does_not_sign_in(self, monkeypatch):
+        """The review's attack: uvicorn trusting X-Forwarded-For (FORWARDED_ALLOW_IPS=*) rewrites the client
+        address, so a direct client claims to be the proxy. Proxy sign-in turns itself off then."""
+        from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
+        monkeypatch.setenv("FORWARDED_ALLOW_IPS", "*")
+        attacker = TestClient(ProxyHeadersMiddleware(main.app, trusted_hosts="*"), client=("203.0.113.9", 1),
+                              follow_redirects=False)
+        r = attacker.get("/", headers={"X-Forwarded-For": "10.1.2.3", "Remote-User": "admin"})
+        assert r.status_code == 303
+
+    def test_docker_image_keeps_the_real_client_address(self):
+        cmd = next(ln for ln in open(os.path.join(os.path.dirname(__file__), "..", "Dockerfile"), encoding="utf-8")
+                   if ln.startswith("CMD"))
+        assert "--no-proxy-headers" in cmd
+
+    def test_ipv4_mapped_address_matches(self):
+        assert self.via("::ffff:10.1.2.3").get("/", headers={"Remote-User": "dan"}).status_code == 200
+
+    def test_sloppy_networks_are_not_trusted(self, monkeypatch):
+        for value in ("10.1.2.3/8", "0.0.0.0/0", "::/0"):   # a typo, and "everyone"
+            monkeypatch.setenv("TRUSTED_PROXIES", value)
+            assert self.via("10.1.2.3").get("/", headers={"Remote-User": "dan"}).status_code == 303, value
 
     def test_login_page_without_password(self, monkeypatch):
         monkeypatch.delenv("APP_PASSWORD")
