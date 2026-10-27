@@ -68,6 +68,7 @@ def sync_playlist(settings: Settings, ref: str, *, jellyfin_name: str | None = N
                                                             redact, should_stop, res.errors, jellyfin_mirror,
                                                             jellyfin_playlist_id, cache)
         res.jellyfin_removed, res.jellyfin_moved = jf_stats.get("removed", 0), jf_stats.get("moved", 0)
+        res.jellyfin_lookup_errors = jf_stats.get("lookup_errors", 0)
         stopped = stopped or should_stop()
     elif not do_jellyfin:
         for tr in results:

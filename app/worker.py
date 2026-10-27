@@ -6,6 +6,7 @@ import os
 import signal
 import threading
 import time
+from collections import defaultdict, deque
 
 from app import db, engine
 
@@ -16,6 +17,8 @@ FLUSH_SECONDS = 1.0
 FINALIZE_DELAY = 15        # seconds: Lidarr starts refreshing a new artist right after it was added
 GIVE_UP_HOURS = 24         # Lidarr unreachable this long: forget pending albums (the next sync retries)
 CACHE_MAX_AGE_DAYS = 180   # remembered lookups older than this are forgotten (looked up again when needed)
+IMPORT_DELAY = 120         # seconds from a Lidarr import (webhook) to the Jellyfin update: time for Jellyfin to scan
+IMPORT_RETRY_DELAY = 600   # tracks still not in Jellyfin after that update: one more try this much later
 PRUNE_EVERY = 24 * 3600    # seconds between cache prunes
 
 _lock = threading.Lock()
@@ -72,18 +75,22 @@ def status() -> dict:
 
 
 def run_pending_once() -> int:
-    """Run everything that is queued or due, one playlist at a time. Returns how many ran."""
+    """Run everything that is queued or due, one playlist at a time: queued and scheduled syncs first, then
+    Jellyfin-only updates after a Lidarr import. Returns how many ran."""
     ran = 0
-    seen: set[int] = set()
+    seen: set[tuple[int, str | None]] = set()
     while not _stop.is_set():
         pid = db.next_queued_id()
         trigger = None
         if pid is None:
             pid = db.next_due_id()
             trigger = "schedule"
-        if pid is None or pid in seen:  # `seen` guards against a hot loop if a run could not clear its flag
+        if pid is None:
+            pid = db.next_jellyfin_due_id()
+            trigger = "import"
+        if pid is None or (pid, trigger) in seen:  # guards against a hot loop if a run could not clear its flag
             break
-        seen.add(pid)
+        seen.add((pid, trigger))
         run_playlist(pid, trigger)
         ran += 1
     return ran
@@ -166,10 +173,17 @@ def _redactor(settings):
 
 
 def run_playlist(pid: int, trigger: str | None = None) -> str | None:
-    """Sync one playlist now (blocking). Returns the run status, or None if the playlist is gone."""
+    """Sync one playlist now (blocking). Returns the run status, or None if nothing ran (the playlist is gone,
+    or it is a Jellyfin update for a playlist whose Jellyfin step was turned off).
+    trigger "import" (after a Lidarr import) only updates the Jellyfin playlist."""
     pl = db.get_playlist(pid)
     if not pl:
         return None
+    jellyfin_only = trigger == "import"
+    if jellyfin_only:  # imports arriving from now on schedule another update
+        db.update_playlist(pid, jellyfin_due_at=None)
+        if not pl["do_jellyfin"]:  # turned off since the import
+            return None
     if trigger is None:
         trigger = "added" if not pl["last_run_at"] and not pl["last_status"] else "manual"
     settings = db.engine_settings()
@@ -177,14 +191,15 @@ def run_playlist(pid: int, trigger: str | None = None) -> str | None:
     _state.update(playlist_id=pid, run_id=run_id)
     sink = _LogSink(run_id, _redactor(settings))
     result, error = None, ""
-    # remembered lookups of earlier syncs (loaded as needed); a full re-check starts empty and overwrites
-    cache = engine.Cache() if pl["full_recheck"] else engine.Cache(loader=db.load_cache_entries)
-    if pl["full_recheck"]:
+    # remembered lookups of earlier syncs (loaded as needed); a full re-check (a full sync's job) starts empty
+    full_recheck = bool(pl["full_recheck"]) and not jellyfin_only
+    cache = engine.Cache() if full_recheck else engine.Cache(loader=db.load_cache_entries)
+    if full_recheck:
         sink("Full re-check: looking up every track again.")
     try:
         result = engine.sync_playlist(
             settings, pl["ref"], jellyfin_name=(pl["jellyfin_name"] or None),
-            do_lidarr=bool(pl["do_lidarr"]), do_jellyfin=bool(pl["do_jellyfin"]),
+            do_lidarr=bool(pl["do_lidarr"]) and not jellyfin_only, do_jellyfin=bool(pl["do_jellyfin"]),
             jellyfin_mirror=bool(pl["jellyfin_mirror"]), jellyfin_playlist_id=pl["jellyfin_playlist_id"] or "",
             cache=cache, wait_for_lidarr=False,
             log=sink, should_stop=_stop.is_set)
@@ -209,6 +224,8 @@ def run_playlist(pid: int, trigger: str | None = None) -> str | None:
             log.exception("could not save the Lidarr albums to finish (the next sync handles them)")
 
     try:
+        if jellyfin_only:
+            return _record_jellyfin_update(pid, pl, run_id, result, error)
         return _record(pid, pl, run_id, result, error, sink)
     finally:
         _state.update(playlist_id=None, run_id=None)
@@ -251,6 +268,66 @@ def _record(pid, pl, run_id, result, error, sink) -> str:
                                last_error=error or None, next_run_at=db.iso_in_hours(interval, now))
         db.prune_runs(pid)
     return status
+
+
+def _record_jellyfin_update(pid, pl, run_id, result, error) -> str:
+    """Record a Jellyfin-only run: the tracks keep their Lidarr results, and the playlist's schedule, queue
+    flag and last status are left alone (they belong to the full syncs). A run that didn't get through the
+    Jellyfin step writes nothing over the earlier results: it is resumed (interrupted) or retried (failed)."""
+    status, summary = "error", {"errors": [error]}
+    retry = True
+    if result is not None:
+        status = "interrupted" if result.stopped and _stop.is_set() else result.status
+        summary = {"tracks": len(result.tracks), "jellyfin_matched": result.jellyfin_matched,
+                   "jellyfin_added": result.jellyfin_added, "jellyfin_duplicates": result.jellyfin_duplicates,
+                   "jellyfin_removed": result.jellyfin_removed, "jellyfin_moved": result.jellyfin_moved,
+                   "errors": result.errors}
+        # the Jellyfin step got through and every search answered (a failed search reads as "missing").
+        # Otherwise the rows aren't written, even though Jellyfin's playlist may already have been updated:
+        # they catch up with the retry or the next full sync, rather than recording guesses as facts.
+        complete = (not result.jellyfin_lookup_errors
+                    and not any(t.jellyfin_status in ("pending", "skipped") for t in result.tracks))
+        if status == "interrupted":
+            retry = False
+            if db.get_playlist(pid):  # shutting down: run again first thing after the restart
+                db.update_playlist(pid, jellyfin_due_at=db.now_iso())
+        elif complete:
+            old_tracks = db.list_tracks(pid)
+            missing_before = sum(t["jellyfin_status"] == "missing" for t in old_tracks)
+            _keep_lidarr_results(old_tracks, result.tracks, bool(pl["do_lidarr"]))
+            if db.get_playlist(pid) and db.replace_tracks(pid, result.tracks):
+                db.update_playlist(pid, track_count=len(result.tracks), jellyfin_matched=result.jellyfin_matched,
+                                   jellyfin_duplicates=result.jellyfin_duplicates,
+                                   jellyfin_playlist_id=result.jellyfin_playlist_id or pl["jellyfin_playlist_id"] or "")
+            # nothing new found: Jellyfin may not have scanned the new files yet
+            missing_after = sum(t.jellyfin_status == "missing" for t in result.tracks)
+            retry = bool(missing_after) and missing_after >= missing_before
+    current = db.get_playlist(pid)
+    if retry and current and pl["jellyfin_due_try"] == 0 and not current["jellyfin_due_at"]:
+        db.update_playlist(pid, jellyfin_due_at=db.iso_in_hours(IMPORT_RETRY_DELAY / 3600), jellyfin_due_try=1)
+    db.finish_run(run_id, status, summary)
+    if current:
+        db.prune_runs(pid)
+    return status
+
+
+def _keep_lidarr_results(old_tracks: list[dict], tracks, lidarr_on: bool) -> None:
+    """Copy each track's Lidarr result from the previous run, matched by what the track is (title, artists,
+    album; repeated tracks in order), so inserted or reordered tracks keep theirs. A track that is new since
+    the last full sync gets "pending" ("skipped" when the playlist doesn't use Lidarr)."""
+    earlier: dict[tuple, deque] = defaultdict(deque)
+    for t in old_tracks:
+        earlier[(t["title"], tuple(t["artists"]), t["album"] or "")].append(t)
+    for tr in tracks:
+        same = earlier.get((tr.title, tuple(tr.artists), tr.album or ""))
+        if same:
+            old = same.popleft()
+            tr.lidarr_status, tr.lidarr_release, tr.lidarr_note = (old["lidarr_status"], old["lidarr_release"],
+                                                                   old["lidarr_note"])
+        elif lidarr_on:
+            tr.lidarr_status, tr.lidarr_release, tr.lidarr_note = "pending", "", "new since the last full sync"
+        else:
+            tr.lidarr_status, tr.lidarr_release, tr.lidarr_note = "skipped", "", ""
 
 
 # --------------------------------------------------- Lidarr albums to finish

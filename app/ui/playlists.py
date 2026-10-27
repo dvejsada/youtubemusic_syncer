@@ -269,7 +269,8 @@ def tracks_panel(pid: int, tracks: list[dict], flt: str):
     return chips, Div(head, *rows, cls="tracklist")
 
 
-TRIGGER_LABELS = {"manual": "Manual sync", "schedule": "Scheduled", "added": "First sync"}
+TRIGGER_LABELS = {"manual": "Manual sync", "schedule": "Scheduled", "added": "First sync",
+                  "import": "After Lidarr import"}
 # status -> (tone, label, icon)
 RUN_BADGES = {"running": ("run", "Running", "refresh"), "ok": ("ok", "Success", "check_circle"),
               "warning": ("warn", "Warnings", "warning"), "error": ("err", "Failed", "x_circle"),

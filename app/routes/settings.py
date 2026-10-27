@@ -1,6 +1,7 @@
 """Settings page: Lidarr / Jellyfin connection, syncing defaults and the optional YouTube Music login."""
 from __future__ import annotations
 
+import json
 import os
 
 from fasthtml.common import APIRouter, Redirect, add_toast
@@ -8,16 +9,22 @@ from starlette.responses import Response
 
 from app import db, engine
 from app.config import MAX_FINALIZE_MIN, clamp, clamp_interval, clean_url
-from app.ui import settings as ui
 from app.routes.playlists import shell_page
+from app.ui import settings as ui
 
 ar = APIRouter()
 
 
 @ar.get("/settings")
-def settings_page():
-    return shell_page("Settings", *ui.settings_page_body(db.get_settings(), db.ytm_auth_file().exists()),
-                      active="settings")
+def settings_page(req):
+    token = db.get_meta(db.WEBHOOK_TOKEN)
+    hook = (f"{str(req.base_url).rstrip('/')}/hooks/lidarr", token) if token else None
+    try:
+        last = json.loads(db.get_meta(db.WEBHOOK_LAST) or "null")
+    except ValueError:
+        last = None
+    return shell_page("Settings", *ui.settings_page_body(db.get_settings(), db.ytm_auth_file().exists(),
+                                                         hook, last), active="settings")
 
 
 def _key_overrides(lidarr_api_key: str, jellyfin_api_key: str) -> dict:
