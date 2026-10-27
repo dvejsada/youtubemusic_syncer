@@ -166,6 +166,19 @@ def sync_now(session, pid: int, htmx: HtmxHeaders):
     return _fragment_for(pid, htmx)
 
 
+@ar.post("/playlists/{pid}/recheck")
+def recheck_playlist(session, pid: int):
+    """Next sync looks every track up again instead of reusing what earlier syncs found."""
+    pl = db.get_playlist(pid)
+    if not pl:
+        return Redirect("/")
+    db.update_playlist(pid, full_recheck=1)
+    db.queue_playlist(pid)
+    worker.wake()
+    add_toast(session, f"Full re-check queued for '{pl['name']}'", "success")
+    return Redirect(f"/playlists/{pid}?tab=runs")
+
+
 @ar.post("/playlists/{pid}/toggle")
 def toggle(session, pid: int, htmx: HtmxHeaders):
     pl = db.get_playlist(pid)

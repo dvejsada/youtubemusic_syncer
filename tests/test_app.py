@@ -591,9 +591,79 @@ class TestWorker:
             assert [t.name for t in threading.enumerate()].count("sync-worker") == 1
         assert "sync-worker" not in [t.name for t in threading.enumerate()]
 
-    @pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
+    def test_lookups_are_remembered_between_syncs(self, servers, monkeypatch):
+        fake_ytm(monkeypatch)
+        pid = add_pl()
+        worker.run_pending_once()
+        assert {kind for kind, _ in db.load_cache()} == {"lidarr", "jellyfin"}
+        db.queue_playlist(pid)
+        worker.run_pending_once()
+        log = db.list_runs(pid)[0]["log"]
+        assert "found by an earlier sync" in log and "remembered from earlier syncs" in log
+
+    def test_full_recheck_looks_everything_up_again(self, client, servers, monkeypatch):
+        fake_ytm(monkeypatch)
+        pid = add_pl()
+        worker.run_pending_once()
+        assert "Re-check all tracks" in client.get(f"/playlists/{pid}?tab=settings").text
+        r = client.post(f"/playlists/{pid}/recheck")
+        assert r.status_code == 303 and r.headers["location"] == f"/playlists/{pid}?tab=runs"
+        assert (db.get_playlist(pid)["full_recheck"], db.get_playlist(pid)["queued"]) == (1, 1)
+        worker.run_pending_once()
+        log = db.list_runs(pid)[0]["log"]
+        assert "Full re-check: looking up every track again." in log and "earlier sync" not in log
+        assert db.get_playlist(pid)["full_recheck"] == 0
+
+    def test_albums_of_new_artists_are_finished_in_the_background(self, servers, monkeypatch):
+        fake_ytm(monkeypatch)
+        monkeypatch.setattr(worker, "FINALIZE_DELAY", 0)
+        pid = add_pl()
+        worker.run_pending_once()
+        assert [r["foreign_album_id"] for r in db.lidarr_pending()] == ["alb-disc", "alb-motion"]
+        assert not any("command" in p for m, p in servers.lidarr.requests if m == "GET")  # the sync didn't wait
+        servers.lidarr.busy_polls = 1
+        assert worker.finalize_pending_once() == 0 and len(db.lidarr_pending()) == 2     # Lidarr still busy
+        assert worker.finalize_pending_once() == 2 and db.lidarr_pending() == []
+        assert servers.lidarr.album_by_foreign("alb-motion")["monitored"]
+        assert ("[later] Lidarr finished importing the new artists: album(s) monitored and searched (2)"
+                in db.list_runs(pid)[0]["log"])
+
+    def test_pending_albums_wait_a_moment_then_give_up_after_the_timeout(self, servers, monkeypatch):
+        pid = add_pl(queued=0)
+        run_id = db.create_run(pid, "manual")
+        url = engine.lidarr_base_url(db.engine_settings())
+        db.add_lidarr_pending(["alb-ghost"], url, pid, run_id)
+        assert worker.finalize_pending_once() == 0 and servers.lidarr.requests == []   # too fresh to check
+        with db.connect() as c:  # older than finalize_timeout_min (1 min in these settings)
+            c.execute("UPDATE lidarr_pending SET added_at=?", (db.iso_in_hours(-1),))
+        assert worker.finalize_pending_once() == 0 and db.lidarr_pending() == []
+        assert "still not visible after 1 min; the next sync picks them up (1)" in db.get_run(run_id)["log"]
+
+    def test_pending_albums_of_another_lidarr_are_dropped(self, servers):
+        pid = add_pl(queued=0)
+        run_id = db.create_run(pid, "manual")
+        db.add_lidarr_pending(["alb-x"], "http://old-lidarr:8686", pid, run_id)
+        worker.finalize_pending_once()
+        assert db.lidarr_pending() == [] and servers.lidarr.requests == []
+        assert "Lidarr settings changed" in db.get_run(run_id)["log"]
+
+    def test_unreachable_lidarr_keeps_pending_albums_for_a_day(self, servers):
+        pid = add_pl(queued=0)
+        run_id = db.create_run(pid, "manual")
+        db.set_settings({"lidarr_url": "http://127.0.0.1:9"})
+        url = engine.lidarr_base_url(db.engine_settings())
+        db.add_lidarr_pending(["alb-a"], url, pid, run_id)
+        with db.connect() as c:
+            c.execute("UPDATE lidarr_pending SET added_at=?", (db.iso_in_hours(-2),))
+        assert worker.finalize_pending_once() == 0 and len(db.lidarr_pending()) == 1
+        with db.connect() as c:
+            c.execute("UPDATE lidarr_pending SET added_at=?", (db.iso_in_hours(-25),))
+        worker.finalize_pending_once()
+        assert db.lidarr_pending() == [] and "Lidarr unreachable" in db.get_run(run_id)["log"]
+
     def test_dead_worker_shuts_the_app_down(self, monkeypatch):
         died = threading.Event()
+        monkeypatch.setattr(threading, "excepthook", lambda args: None)  # the thread's SystemExit is expected
         monkeypatch.setattr(worker, "_exit_process", died.set)
         monkeypatch.setattr(worker, "run_pending_once", lambda: (_ for _ in ()).throw(SystemExit))
         worker.start()

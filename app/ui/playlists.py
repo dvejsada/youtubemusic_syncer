@@ -357,6 +357,12 @@ def playlist_settings_panel(pl: dict):
                                           bool(pl["jellyfin_mirror"])))),
                     panel(btn("Save changes", "check", type="submit"), foot=True)),
             action=f"/playlists/{pid}/settings", method="post"),
+        section("Lookups", "Syncs remember what earlier syncs found and only look up tracks that are new or "
+                "not resolved yet. Tracks that were not found are looked up again after a week.",
+                panel(Div("Look every track up again on the next sync, for example after fixing something in "
+                          "Lidarr or Jellyfin by hand.", cls="muted")),
+                panel(Form(btn("Re-check all tracks", "refresh", "outline", type="submit"),
+                           action=f"/playlists/{pid}/recheck", method="post"), foot=True)),
         section("Danger zone", "Irreversible actions for this playlist.",
                 panel(Div("Removes it from Playlist Sync together with its tracks and run history. The Jellyfin "
                           "playlist and anything already added to Lidarr stay untouched.", cls="muted"),

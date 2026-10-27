@@ -89,6 +89,7 @@ class SyncResult:
     errors: list[str] = field(default_factory=list)
     status: str = "ok"               # ok | warning (some not found / missing) | error
     stopped: bool = False            # extra: should_stop() aborted the run early
+    lidarr_pending: list[str] = field(default_factory=list)  # wait_for_lidarr=False: for lidarr_finalize_step
     cover_url: str = ""              # YouTube Music playlist cover (source URL); "" for mixes
 
 
@@ -110,6 +111,35 @@ def _sleep_interruptible(seconds: float, should_stop) -> None:
         step = min(1.0, remaining)
         _sleep(step)
         remaining -= step
+
+
+# ------------------------------------------------------------------- cache
+
+CACHE_VERSION = 1   # bump when matching changes, so that earlier lookups are redone
+RETRY_DAYS = 7      # a lookup that found nothing is tried again after this many days
+
+
+class Cache:
+    """Lookups remembered between syncs, {(kind, key): value}, so a sync only looks up what is new or
+    unresolved. kinds: "ytm" (song version of a YouTube video), "lidarr" (release of an album group),
+    "jellyfin" (library item of a track). The app loads it from and saves `changed` to its database."""
+
+    def __init__(self, data: dict | None = None):
+        self.data = data if data is not None else {}
+        self.changed: set = set()
+
+    def get(self, kind: str, key: str) -> dict | None:
+        v = self.data.get((kind, key))
+        return v if isinstance(v, dict) and v.get("v") == CACHE_VERSION else None
+
+    def put(self, kind: str, key: str, value: dict) -> None:
+        self.data[(kind, key)] = {**value, "v": CACHE_VERSION, "at": _now()}
+        self.changed.add((kind, key))
+
+    @staticmethod
+    def recent(value: dict) -> bool:
+        """For a lookup that found nothing: too recent to try again."""
+        return _now() - value.get("at", 0) < RETRY_DAYS * 86400
 
 
 # ----------------------------------------------------------------- helpers
@@ -340,12 +370,27 @@ def _open_playlist(settings: Settings, pid: str, log=None):
 
 
 def read_playlist(settings: Settings, ref: str, log=None) -> tuple[str, bool, list[dict]]:
-    """Returns (playlist name, is_mix, tracks) with tracks = [{"title", "artists", "album", "thumb"}]."""
+    """Returns (playlist name, is_mix, tracks) with tracks = [{"title", "artists", "album", "thumb", "video_id"}]."""
     return read_playlist_full(settings, ref, log)[:3]
 
 
-def read_playlist_full(settings: Settings, ref: str, log=None) -> tuple[str, bool, list[dict], str]:
-    """Like read_playlist, plus the playlist cover URL ('' if none): (name, is_mix, tracks, cover_url)."""
+def _song_version(ytm, title_clean: str, artists: list[str]):
+    """Music videos / uploads often have no album: the YT Music song version of it, or None."""
+    candidates = [artists[0]] + ([artists[1]] if len(artists) > 1 else [])
+    for art in candidates:
+        for r in ytm.search(f"{art} {clean(title_clean)}", filter="songs", limit=8):
+            ra = [a["name"] for a in (r.get("artists") or [])]
+            if (r.get("album") and sim(r["title"], title_clean) >= 0.85
+                    and any(sim(x, y) >= 0.8 for x in ra for y in artists)):
+                return r
+    return None
+
+
+def read_playlist_full(settings: Settings, ref: str, log=None,
+                       cache: Cache | None = None) -> tuple[str, bool, list[dict], str]:
+    """Like read_playlist, plus the playlist cover URL ('' if none): (name, is_mix, tracks, cover_url).
+    Song-version lookups of album-less videos are remembered in `cache` (per video id)."""
+    cache = cache if cache is not None else Cache()
     pid = parse_playlist_ref(ref)
     try:
         ytm, pl_title, raw, is_mix, cover = _open_playlist(settings, pid, log)
@@ -358,33 +403,33 @@ def read_playlist_full(settings: Settings, ref: str, log=None) -> tuple[str, boo
         artists = [a["name"].strip() for a in (t.get("artists") or []) if a.get("name")]
         album = (t.get("album") or {}).get("name")
         title = t.get("title") or ""
+        video_id = t.get("videoId") or ""
         thumb = pick_thumb(t.get("thumbnails") or t.get("thumbnail"))  # playlist items / watch-queue items
         real_artist, title_clean = split_title(title, artists)
         if real_artist and not album:
             artists = [real_artist] + [a for a in artists if sim(a, real_artist) < 0.85]
 
-        # Music videos / uploads often have no album: ask YT Music for the song version
         if not album and title_clean and artists:
-            candidates = [artists[0]] + ([artists[1]] if len(artists) > 1 else [])
-            try:
-                for art in candidates:
-                    res = ytm.search(f"{art} {clean(title_clean)}", filter="songs", limit=8)
-                    hit = None
-                    for r in res:
-                        ra = [a["name"] for a in (r.get("artists") or [])]
-                        if (r.get("album") and sim(r["title"], title_clean) >= 0.85
-                                and any(sim(x, y) >= 0.8 for x in ra for y in artists)):
-                            hit = r
-                            break
-                    if hit:
-                        album = hit["album"]["name"]
-                        title_clean = hit["title"]
-                        artists = [a["name"] for a in hit["artists"]] or artists
-                        thumb = thumb or pick_thumb(hit.get("thumbnails"))
-                        break
-            except Exception:
-                pass
-        tracks.append({"title": title_clean or title, "artists": artists, "album": album, "thumb": thumb})
+            src = [title, artists]  # what YouTube said: a cached answer only counts while that is unchanged
+            hit = cache.get("ytm", video_id) if video_id else None
+            if hit and hit["src"] == src and (hit["album"] or Cache.recent(hit)):
+                found = hit if hit["album"] else None
+            else:
+                try:
+                    r, searched = _song_version(ytm, title_clean, artists), True
+                except Exception:
+                    r, searched = None, False  # don't remember a failed search
+                found = r and {"album": r["album"]["name"], "title": r["title"],
+                               "artists": [a["name"] for a in r["artists"]], "thumb": pick_thumb(r.get("thumbnails"))}
+                if video_id and searched:
+                    cache.put("ytm", video_id, {"src": src, **(found or {"album": None})})
+            if found:
+                album = found["album"]
+                title_clean = found["title"]
+                artists = found["artists"] or artists
+                thumb = thumb or found["thumb"]
+        tracks.append({"title": title_clean or title, "artists": artists, "album": album, "thumb": thumb,
+                       "video_id": video_id})
     return pl_title, is_mix, tracks, cover
 
 
@@ -482,19 +527,25 @@ _NOLOG = lambda m="": None  # noqa: E731
 class Lidarr:
     CONNECT_TIMEOUT = 10
 
-    def __init__(self, url, key, root=None, quality=None, metadata=None, dry=False, log=_NOLOG):
+    BUSY_COMMANDS = {"RefreshArtist", "BulkRefreshArtist", "RefreshAlbum", "AddArtist"}
+
+    def __init__(self, url, key, root=None, quality=None, metadata=None, dry=False, log=_NOLOG, connect_only=False):
+        """connect_only: just the API session (for lidarr_finalize_step), no profiles / artist list."""
         self.url = _base_url(url) + "/api/v1"
         self.s = requests.Session()
         self.s.headers["X-Api-Key"] = key
         self.dry = dry
         self.log = log
+        self._library = None
+        self.pending = set()
+        if connect_only:
+            return
         self.root = self._pick("rootfolder", root, "path")["path"]
         self.qp = self._pick("qualityprofile", quality, "name")["id"]
         mp = self._pick("metadataprofile", metadata, "name")
         self.mp = mp["id"]
         self.artists = {a["foreignArtistId"]: a for a in self.get("artist")}
         self._album_cache = {}
-        self.pending = set()
         log(f"Lidarr: root={self.root} qualityProfile={self.qp} metadataProfile={mp.get('name')}, "
             f"{len(self.artists)} artists in library")
         allowed = {p["albumType"]["name"] for p in mp.get("primaryAlbumTypes", []) if p.get("allowed")}
@@ -583,17 +634,29 @@ class Lidarr:
             if alb is None:
                 # album not in artist's list (filtered by metadata profile?) -> add it directly
                 return self._add_album(found, existing_artist=artist)
-            if alb.get("monitored") and (alb.get("statistics") or {}).get("percentOfTracks", 0) >= 100:
-                return "already downloaded"
-            if not alb.get("monitored"):
-                self.send("PUT", "album/monitor", {"albumIds": [alb["id"]], "monitored": True})
-            if not artist.get("monitored"):
-                artist["monitored"] = True
-                self.send("PUT", f"artist/{artist['id']}", artist)
-            self.send("POST", "command", {"name": "AlbumSearch", "albumIds": [alb["id"]]})
-            return "monitored + search started"
+            return self.ensure_existing(artist, alb)
 
         return self._add_album(found)
+
+    def ensure_existing(self, artist, alb):
+        """The album is in Lidarr already: make sure it and its artist are monitored and it is searched."""
+        if alb.get("monitored") and (alb.get("statistics") or {}).get("percentOfTracks", 0) >= 100:
+            return "already downloaded"
+        if not alb.get("monitored"):
+            self.send("PUT", "album/monitor", {"albumIds": [alb["id"]], "monitored": True})
+        if not artist.get("monitored"):
+            artist["monitored"] = True
+            self.send("PUT", f"artist/{artist['id']}", artist)
+        self.send("POST", "command", {"name": "AlbumSearch", "albumIds": [alb["id"]]})
+        return "monitored + search started"
+
+    def library_album(self, foreign_album_id):
+        """(artist, album) of an album that is in Lidarr's library, or None. One request for the whole run."""
+        if self._library is None:
+            self._library = {a["foreignAlbumId"]: a for a in self.get("album")}
+        alb = self._library.get(foreign_album_id)
+        artist = alb and next((a for a in self.artists.values() if a["id"] == alb.get("artistId")), None)
+        return (artist, alb) if artist else None
 
     def _add_album(self, found, existing_artist=None):
         body = dict(found)
@@ -634,34 +697,42 @@ class Lidarr:
         log = self.log
         log("")
         log(f"Waiting for Lidarr to finish importing new artists (up to {timeout_min} min)...")
-        busy_names = {"RefreshArtist", "BulkRefreshArtist", "RefreshAlbum", "AddArtist"}
         deadline = _now() + timeout_min * 60
         _sleep_interruptible(10, should_stop)
         while _now() < deadline and not should_stop():
-            busy = [c for c in self.get("command")
-                    if c.get("name") in busy_names and c.get("status") in ("queued", "started")]
+            busy = self.refreshing()
             if not busy:
                 break
-            log(f"  ...{len(busy)} refresh task(s) still running")
+            log(f"  ...{busy} refresh task(s) still running")
             _sleep_interruptible(15, should_stop)
         if should_stop():
             log("Stopped while waiting for Lidarr; albums will be picked up on the next sync.")
             return None
-
-        by_foreign = {a["foreignAlbumId"]: a for a in self.get("album")}
-        ids, missing = [], []
-        for fid in self.pending:
-            alb = by_foreign.get(fid)
-            (ids.append(alb["id"]) if alb else missing.append(fid))
-        unmonitored = [by_foreign[f]["id"] for f in self.pending if f in by_foreign and not by_foreign[f].get("monitored")]
-        if unmonitored:
-            self.send("PUT", "album/monitor", {"albumIds": unmonitored, "monitored": True})
-        for k in range(0, len(ids), 50):
-            self.send("POST", "command", {"name": "AlbumSearch", "albumIds": ids[k:k + 50]})
-        log(f"Lidarr: {len(ids)} album(s) monitored and searched ({len(unmonitored)} had been unmonitored by Lidarr).")
+        done, missing, unmonitored = self.monitor_and_search(self.pending)
+        log(f"Lidarr: {len(done)} album(s) monitored and searched ({unmonitored} had been unmonitored by Lidarr).")
         if missing:
             log(f"  {len(missing)} album(s) not visible in Lidarr yet - they will be picked up on the next sync.")
         return set(missing)
+
+    def refreshing(self) -> int:
+        """Number of artist refresh / import tasks Lidarr is still running."""
+        return sum(c.get("name") in self.BUSY_COMMANDS and c.get("status") in ("queued", "started")
+                   for c in self.get("command"))
+
+    def monitor_and_search(self, foreign_album_ids) -> tuple[list, list, int]:
+        """Monitor the albums (Lidarr's refresh of a new artist unmonitors them) and search for them.
+        Returns (done, missing, unmonitored): the foreign ids that were handled / are not visible in
+        Lidarr yet, and how many albums had been unmonitored."""
+        by_foreign = {a["foreignAlbumId"]: a for a in self.get("album")}
+        done = [f for f in foreign_album_ids if f in by_foreign]
+        missing = [f for f in foreign_album_ids if f not in by_foreign]
+        unmonitored = [by_foreign[f]["id"] for f in done if not by_foreign[f].get("monitored")]
+        if unmonitored:
+            self.send("PUT", "album/monitor", {"albumIds": unmonitored, "monitored": True})
+        ids = [by_foreign[f]["id"] for f in done]
+        for k in range(0, len(ids), 50):
+            self.send("POST", "command", {"name": "AlbumSearch", "albumIds": ids[k:k + 50]})
+        return done, missing, len(unmonitored)
 
 
 def resolve(lid, mb, a):
@@ -723,8 +794,14 @@ def _join_note(*parts) -> str:
 
 
 def _sync_lidarr(lid: Lidarr, tracks: list[dict], results: list[TrackResult], dry: bool,
-                 log, redact, timeout_min: int, should_stop) -> bool:
-    """Runs the Lidarr phase and fills the TrackResults. Returns True if it was stopped early."""
+                 log, redact, timeout_min: int, should_stop, cache: Cache | None = None,
+                 wait: bool = True, pending: list | None = None) -> bool:
+    """Runs the Lidarr phase and fills the TrackResults. Returns True if it was stopped early.
+    Releases found before (`cache`) are not looked up again while they are in Lidarr's library.
+    Without `wait`, albums of newly added artists are not monitored here but put into `pending`
+    for lidarr_finalize_step (the app's worker does that in the background)."""
+    cache = cache if cache is not None else Cache()
+    pending = pending if pending is not None else []
     # group tracks by album; tracks without album are tried as singles
     albums = {}
     for t, tr in zip(tracks, results):
@@ -749,45 +826,78 @@ def _sync_lidarr(lid: Lidarr, tracks: list[dict], results: list[TrackResult], dr
             tr.lidarr_status, tr.lidarr_release, tr.lidarr_note = status, release, note
 
     by_release: dict[str, list] = {}  # foreignAlbumId -> groups that ended up there
-    for a in albums.values():
+    reused = 0
+    for key, a in albums.items():
         if should_stop():
             log("Stopped.")
             return True
         artists, album = a["artists"], a["album"]
         label = f"{artists[0]} - {album}" if album else f"{artists[0]} - {a['titles'][0]} (no album on YouTube)"
+        ckey = "|".join((lid.url, *key))
         try:
-            found, how, err = resolve(lid, mb, a)
-            if not found:
+            cached = cache.get("lidarr", ckey)
+            if cached and not cached["fid"] and Cache.recent(cached):
                 failed.append(label)
-                if err:
-                    log(f"  ?  {label}  - lookup failed: {redact(err)}")
-                    mark(a, "error", "", f"lookup failed: {redact(err)}")
-                else:
-                    log(f"  ?  {label}  - not on MusicBrainz, add manually")
-                    mark(a, "not_found", "", "not on MusicBrainz, add manually")
+                log(f"  ?  {label}  - not on MusicBrainz, add manually (looked up before; tried again after "
+                    f"{RETRY_DAYS} days)")
+                mark(a, "not_found", "", "not on MusicBrainz, add manually")
                 continue
-            kind = found.get("albumType") or "?"
-            release = f"{found['artist']['artistName']} - {found['title']} [{kind}]"
+            found = in_library = None
+            if cached and cached["fid"]:
+                # found before: no lookup while the album is in Lidarr (else the exact id lookup adds it again)
+                in_library = lid.library_album(cached["fid"])
+                if not in_library:
+                    try:
+                        found = lid.by_mbid(cached["fid"])
+                    except Exception:
+                        found = None  # look it up from scratch below
+            if in_library or found:
+                fid, release, how = cached["fid"], cached["release"], cached["how"]
+                reused += 1
+            else:
+                found, how, err = resolve(lid, mb, a)
+                if not found:
+                    failed.append(label)
+                    if err:
+                        log(f"  ?  {label}  - lookup failed: {redact(err)}")
+                        mark(a, "error", "", f"lookup failed: {redact(err)}")
+                    else:
+                        log(f"  ?  {label}  - not on MusicBrainz, add manually")
+                        mark(a, "not_found", "", "not on MusicBrainz, add manually")
+                        cache.put("lidarr", ckey, {"fid": ""})
+                    continue
+                kind = found.get("albumType") or "?"
+                fid, release = found["foreignAlbumId"], f"{found['artist']['artistName']} - {found['title']} [{kind}]"
+                cache.put("lidarr", ckey, {"fid": fid, "release": release, "how": how})
             how_note = how.strip().strip("()")
-            if found["foreignAlbumId"] in done:
+            if fid in done:
                 log(f"  =  {label}  -> same release as above, skipped")
                 mark(a, "duplicate", release, _join_note(how_note, "same release as another track"))
-                by_release.setdefault(found["foreignAlbumId"], []).append(a)
+                by_release.setdefault(fid, []).append(a)
                 continue
-            done.add(found["foreignAlbumId"])
-            status = lid.ensure(found)
+            done.add(fid)
+            status = lid.ensure_existing(*in_library) if in_library else lid.ensure(found)
             log(f"  ✓  {label}  ->  {release}{how}: {tag}{status}")
             st, extra = _ENSURE_STATUS.get(status, ("added", status))
             mark(a, st, release, _join_note(how_note, extra))
-            by_release.setdefault(found["foreignAlbumId"], []).append(a)
+            by_release.setdefault(fid, []).append(a)
         except Exception as e:
             failed.append(label)
             log(f"  !  {label}: {redact(e)}")
             mark(a, "error", "", redact(e))
 
+    if reused:
+        log(f"  ({reused} of them found by an earlier sync, not looked up again)")
     if failed:
         log("")
         log(f"  {len(failed)} item(s) need manual adding in Lidarr (see '?' / '!' above).")
+    if not wait:
+        if lid.pending and not dry:
+            pending.extend(sorted(lid.pending))
+            log("")
+            log(f"Lidarr: {len(lid.pending)} album(s) of new artists will be monitored and searched once Lidarr "
+                "has imported the artists (checked in the background).")
+        return bool(should_stop())
     missing = lid.finalize(timeout_min, should_stop)
     if missing:
         for fid in missing:
@@ -866,6 +976,15 @@ class Jellyfin:
             if score >= 0.9:
                 break
         return best if score >= 0.75 else None
+
+    def existing_ids(self, ids: list[str]) -> set:
+        """Which of these library items still exist for the user."""
+        out = set()
+        for k in range(0, len(ids), 100):
+            out |= {i["Id"] for i in self.req("GET", "/Items", params={
+                "userId": self.uid, "ids": ",".join(ids[k:k + 100]), "recursive": "true",
+            }).get("Items", [])}
+        return out
 
     def playlist_entries(self, playlist_id) -> list[dict]:
         """The playlist in order: [{"entry", "id", "name"}]. Current Jellyfin uses the item id as entry id."""
@@ -965,13 +1084,24 @@ class Jellyfin:
 
 def _sync_jellyfin(jf: Jellyfin, name: str, tracks: list[dict], results: list[TrackResult],
                    log, redact, should_stop, errors: list[str], mirror: bool = False,
-                   stats: dict | None = None, saved_id: str = "") -> str:
+                   stats: dict | None = None, saved_id: str = "", cache: Cache | None = None) -> str:
     """Runs the Jellyfin phase. Returns the playlist id ('' if none); mirror counts go into `stats`.
-    `saved_id` is the Jellyfin playlist an earlier sync used."""
+    `saved_id` is the Jellyfin playlist an earlier sync used. Matches of earlier syncs (`cache`) are reused
+    while the library item exists; only the other tracks are searched."""
     stats = stats if stats is not None else {}
+    cache = cache if cache is not None else Cache()
     lookup_failed = False
     log("")
     log(f"== Jellyfin: matching {len(tracks)} tracks ==")
+    keys = [f"{jf.url}|{jf.uid}|" + (t.get("video_id") or f"{norm((t['artists'] or [''])[0])}|{norm(t['title'])}")
+            for t in tracks]
+    remembered = {k: c["id"] for k in keys if (c := cache.get("jellyfin", k))}
+    try:
+        alive = jf.existing_ids(sorted(set(remembered.values()))) if remembered else set()
+    except Exception as e:
+        log(f"  !  could not check the matches of earlier syncs, searching again: {redact(e)}")
+        alive = set()
+    reused = 0
     ids, missing = [], []
     matched: list[tuple[TrackResult, str]] = []
     duplicates: list[TrackResult] = []
@@ -982,7 +1112,13 @@ def _sync_jellyfin(jf: Jellyfin, name: str, tracks: list[dict], results: list[Tr
             log("Stopped.")
             return ""
         try:
-            it = jf.find_track(t)
+            if remembered.get(keys[i]) in alive:
+                it = {"Id": remembered[keys[i]]}
+                reused += 1
+            else:
+                it = jf.find_track(t)
+                if it:
+                    cache.put("jellyfin", keys[i], {"id": it["Id"]})
             consecutive_errors = 0
         except Exception as e:
             log(f"  !  {t['title']}: {redact(e)}")
@@ -1011,7 +1147,7 @@ def _sync_jellyfin(jf: Jellyfin, name: str, tracks: list[dict], results: list[Tr
         first_pos[it["Id"]] = tr.position
         ids.append(it["Id"])
         matched.append((tr, it["Id"]))
-    log(f"  matched {len(ids)}/{len(tracks)}")
+    log(f"  matched {len(ids)}/{len(tracks)}" + (f" ({reused} remembered from earlier syncs)" if reused else ""))
     if duplicates:
         log(f"  {len(duplicates)} track(s) are the same Jellyfin song as an earlier track (added once):")
         for tr in duplicates:
@@ -1060,13 +1196,18 @@ def _sync_jellyfin(jf: Jellyfin, name: str, tracks: list[dict], results: list[Tr
 def sync_playlist(settings: Settings, ref: str, *, jellyfin_name: str | None = None,
                   do_lidarr: bool = True, do_jellyfin: bool = True, dry_run: bool = False,
                   jellyfin_mirror: bool = False, jellyfin_playlist_id: str = "",
+                  cache: Cache | None = None, wait_for_lidarr: bool = True,
                   log=print, should_stop=lambda: False) -> SyncResult:
     """Sync one YouTube Music playlist. Raises EngineError for fatal problems (service
     unreachable / unauthorised, playlist unreadable); per-track problems end up in the result.
     With `jellyfin_mirror` the Jellyfin playlist is made to match: other songs and duplicate entries are
     removed and the YouTube order is restored (instead of only appending).
-    `jellyfin_playlist_id` (from an earlier result) keeps using that playlist even if it was renamed in Jellyfin."""
+    `jellyfin_playlist_id` (from an earlier result) keeps using that playlist even if it was renamed in Jellyfin.
+    `cache` remembers lookups between syncs (see Cache); pass the same one again to only look up what is new.
+    Without `wait_for_lidarr` the sync doesn't wait for Lidarr to import new artists: their albums end up in
+    `result.lidarr_pending` and lidarr_finalize_step monitors them later."""
     redact = _redactor(settings)
+    cache = cache if cache is not None else Cache()
 
     def say(msg=""):
         log(redact(msg))
@@ -1091,7 +1232,7 @@ def sync_playlist(settings: Settings, ref: str, *, jellyfin_name: str | None = N
         except Exception as e:
             raise _fatal("Jellyfin", e, settings.jellyfin_url, redact) from None
 
-    title, is_mix, tracks, cover = read_playlist_full(settings, ref, say)
+    title, is_mix, tracks, cover = read_playlist_full(settings, ref, say, cache)
     say(f"YouTube Music playlist '{title}': {len(tracks)} tracks")
 
     results = [TrackResult(position=i, title=t["title"], artists=list(t["artists"]), album=t["album"],
@@ -1101,8 +1242,8 @@ def sync_playlist(settings: Settings, ref: str, *, jellyfin_name: str | None = N
 
     stopped = False
     if do_lidarr:
-        stopped = _sync_lidarr(lid, tracks, results, dry_run, say, redact,
-                               settings.finalize_timeout_min, should_stop)
+        stopped = _sync_lidarr(lid, tracks, results, dry_run, say, redact, settings.finalize_timeout_min,
+                               should_stop, cache, wait_for_lidarr, res.lidarr_pending)
     else:
         for tr in results:
             tr.lidarr_status = "skipped"
@@ -1110,7 +1251,7 @@ def sync_playlist(settings: Settings, ref: str, *, jellyfin_name: str | None = N
         jf_stats: dict = {}
         res.jellyfin_playlist_id = _sync_jellyfin(jf, jellyfin_name or title, tracks, results,
                                                   say, redact, should_stop, res.errors, jellyfin_mirror, jf_stats,
-                                                  jellyfin_playlist_id)
+                                                  jellyfin_playlist_id, cache)
         res.jellyfin_removed, res.jellyfin_moved = jf_stats.get("removed", 0), jf_stats.get("moved", 0)
         stopped = stopped or should_stop()
     elif not do_jellyfin:
@@ -1135,6 +1276,30 @@ def sync_playlist(settings: Settings, ref: str, *, jellyfin_name: str | None = N
     say(f"Done: Lidarr {res.lidarr_found}/{len(results)}, Jellyfin {res.jellyfin_matched}/{len(results)} "
         f"({res.jellyfin_added} added) - {res.status}")
     return res
+
+
+@dataclass
+class FinalizeStep:
+    busy: bool = False                                 # Lidarr is still importing: nothing was done
+    done: list[str] = field(default_factory=list)      # albums monitored and searched
+    missing: list[str] = field(default_factory=list)   # not visible in Lidarr (yet)
+    unmonitored: int = 0                               # of `done`, unmonitored by Lidarr's artist refresh
+
+
+def lidarr_base_url(settings: Settings) -> str:
+    """Identifies the configured Lidarr (what pending albums belong to)."""
+    return _base_url(settings.lidarr_url)
+
+
+def lidarr_finalize_step(settings: Settings, foreign_album_ids: list[str], force: bool = False) -> FinalizeStep:
+    """The non-blocking version of Lidarr.finalize for sync_playlist(wait_for_lidarr=False): while Lidarr is
+    still refreshing / importing artists it does nothing (busy, unless `force`); otherwise it monitors and
+    searches the albums that are visible. A handful of requests, meant to be repeated until done."""
+    lid = Lidarr(settings.lidarr_url, settings.lidarr_api_key, connect_only=True)
+    if not force and lid.refreshing():
+        return FinalizeStep(busy=True)
+    done, missing, unmonitored = lid.monitor_and_search(list(foreign_album_ids))
+    return FinalizeStep(done=done, missing=missing, unmonitored=unmonitored)
 
 
 # ------------------------------------------------------ public: connection checks

@@ -12,6 +12,8 @@ log = logging.getLogger("playlist-sync.worker")
 
 POLL_SECONDS = 30
 FLUSH_SECONDS = 1.0
+FINALIZE_DELAY = 15        # seconds: Lidarr starts refreshing a new artist right after it was added
+GIVE_UP_HOURS = 24         # Lidarr unreachable this long: forget pending albums (the next sync retries)
 
 _lock = threading.Lock()
 _thread: threading.Thread | None = None
@@ -92,6 +94,10 @@ def _loop() -> None:
                 run_pending_once()
             except Exception:
                 log.exception("worker iteration failed")
+            try:
+                finalize_pending_once()
+            except Exception:
+                log.exception("finishing Lidarr albums failed")
             _wake.wait(POLL_SECONDS)
             _wake.clear()
     finally:
@@ -163,11 +169,16 @@ def run_playlist(pid: int, trigger: str | None = None) -> str | None:
     _state.update(playlist_id=pid, run_id=run_id)
     sink = _LogSink(run_id, _redactor(settings))
     result, error = None, ""
+    # remembered lookups of earlier syncs; a full re-check starts empty (and overwrites what it finds)
+    cache = engine.Cache() if pl["full_recheck"] else engine.Cache(db.load_cache())
+    if pl["full_recheck"]:
+        sink("Full re-check: looking up every track again.")
     try:
         result = engine.sync_playlist(
             settings, pl["ref"], jellyfin_name=(pl["jellyfin_name"] or None),
             do_lidarr=bool(pl["do_lidarr"]), do_jellyfin=bool(pl["do_jellyfin"]),
             jellyfin_mirror=bool(pl["jellyfin_mirror"]), jellyfin_playlist_id=pl["jellyfin_playlist_id"] or "",
+            cache=cache, wait_for_lidarr=False,
             log=sink, should_stop=_stop.is_set)
     except engine.EngineError as e:
         error = sink.redact(str(e))
@@ -178,6 +189,12 @@ def run_playlist(pid: int, trigger: str | None = None) -> str | None:
         sink(f"! {error}")
     finally:
         sink.close()
+    try:  # also after a failed run: what was looked up stays useful
+        db.save_cache({k: cache.data[k] for k in cache.changed})
+    except Exception:  # pragma: no cover
+        log.exception("could not save the lookup cache")
+    if result is not None and result.lidarr_pending:
+        db.add_lidarr_pending(result.lidarr_pending, engine.lidarr_base_url(settings), pid, run_id)
 
     try:
         return _record(pid, pl, run_id, result, error, sink)
@@ -206,6 +223,7 @@ def _record(pid, pl, run_id, result, error, sink) -> str:
                 track_count=len(result.tracks), cover_url=result.cover_url or pl["cover_url"] or "",
                 lidarr_found=result.lidarr_found,
                 jellyfin_matched=result.jellyfin_matched, jellyfin_duplicates=result.jellyfin_duplicates,
+                full_recheck=0,
                 jellyfin_playlist_id=result.jellyfin_playlist_id or pl["jellyfin_playlist_id"] or "")
     else:
         summary = {"errors": [error]}
@@ -219,3 +237,60 @@ def _record(pid, pl, run_id, result, error, sink) -> str:
                                last_error=error or None, next_run_at=db.iso_in_hours(interval, now))
         db.prune_runs(pid)
     return status
+
+
+# --------------------------------------------------- Lidarr albums to finish
+
+def finalize_pending_once() -> int:
+    """Monitor and search the albums of newly added artists once Lidarr has imported them (a sync doesn't
+    wait for that, see engine.lidarr_finalize_step). Never blocks: while Lidarr is busy the albums stay
+    pending for the next tick; after finalize_timeout_min the visible ones are monitored anyway and the rest
+    is left to the next sync. Notes go into the log of the run that added the albums. Returns how many
+    albums were monitored and searched."""
+    rows = db.lidarr_pending()
+    if not rows:
+        return 0
+    settings = db.engine_settings()
+    now = db.now_dt()
+
+    def age(r) -> float:
+        return (now - (db.parse_iso(r["added_at"]) or now)).total_seconds()
+
+    other = [r for r in rows if r["lidarr_url"] != engine.lidarr_base_url(settings) or not settings.lidarr_api_key]
+    if other:  # Lidarr was changed or removed in Settings meanwhile
+        _note(other, "Lidarr settings changed: albums of new artists not monitored here; the next sync handles them")
+        db.remove_lidarr_pending([r["foreign_album_id"] for r in other])
+    due = [r for r in rows if r not in other and age(r) >= FINALIZE_DELAY]
+    if not due:
+        return 0
+    timeout = settings.finalize_timeout_min * 60
+    try:
+        step = engine.lidarr_finalize_step(settings, [r["foreign_album_id"] for r in due],
+                                           force=any(age(r) >= timeout for r in due))
+    except Exception as e:
+        log.warning("Lidarr: could not finish albums of new artists: %s", _redactor(settings)(str(e)))
+        old = [r for r in due if age(r) >= GIVE_UP_HOURS * 3600]
+        if old:
+            _note(old, "Lidarr unreachable: albums of new artists not monitored; the next sync retries")
+            db.remove_lidarr_pending([r["foreign_album_id"] for r in old])
+        return 0
+    if step.busy:
+        return 0
+    done = set(step.done)
+    handled = [r for r in due if r["foreign_album_id"] in done]
+    gone = [r for r in due if r["foreign_album_id"] not in done and age(r) >= timeout]
+    _note(handled, "Lidarr finished importing the new artists: album(s) monitored and searched")
+    _note(gone, f"Lidarr: album(s) still not visible after {settings.finalize_timeout_min} min; "
+                "the next sync picks them up")
+    db.remove_lidarr_pending([r["foreign_album_id"] for r in handled + gone])
+    return len(handled)
+
+
+def _note(rows: list[dict], text: str) -> None:
+    """Append "text (n)" to the log of each run these pending albums came from."""
+    by_run: dict = {}
+    for r in rows:
+        by_run[r["run_id"]] = by_run.get(r["run_id"], 0) + 1
+    for run_id, n in by_run.items():
+        if run_id:
+            db.append_log(run_id, f"\n[later] {text} ({n})\n")
