@@ -104,3 +104,16 @@ def test_services_use_their_retry_rules():
     mb = engine.MusicBrainz()
     assert (mb.http.retry_on, mb.http.attempts, mb.http.backoff) == ((503,), 5, 5)
     assert mb.http.before is engine.musicbrainz._mb_throttle   # the rate limit covers retries too
+
+
+def test_lidarr_and_jellyfin_clients_are_set_up_as_intended():
+    from mock_servers import MockJellyfin, MockLidarr
+    lidarr, jf = MockLidarr("lk").start(), MockJellyfin("jk").start()
+    try:
+        lid = engine.Lidarr(lidarr.url, "lk")
+        assert (lid.http.retry_on, lid.http.attempts, lid.http.backoff, lid.http.timeout) ==             ((429, 500, 502, 503, 504), 3, 3.0, (10, 90))
+        jfc = engine.Jellyfin(jf.url, "jk", "")
+        assert (jfc.http.retry_on, jfc.http.attempts, jfc.http.backoff, jfc.http.timeout) ==             ((429, 502, 503, 504), 3, 1, (10, 60))   # busy answers only, short waits
+    finally:
+        lidarr.stop()
+        jf.stop()
