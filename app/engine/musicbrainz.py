@@ -30,14 +30,13 @@ class MusicBrainz:
     def __init__(self):
         # MusicBrainz answers 503 when a client is too fast: retried after 5, 10, 20, 40 s
         self.http = Http(self.URL, {"User-Agent": "ytm_sync/1.0 (self-hosted YouTube Music -> Lidarr helper)"},
-                         timeout=(10, 30), retry_on=(503,), attempts=5, backoff=5)
+                         timeout=(10, 30), retry_on=(503,), attempts=5, backoff=5, before=_mb_throttle)
 
     @staticmethod
     def q(s):
         return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
     def _search(self, entity, query):
-        _mb_throttle()  # retries wait longer than the rate limit anyway
         return self.http.get(entity, {"query": query, "fmt": "json", "limit": 25})
 
     @staticmethod
