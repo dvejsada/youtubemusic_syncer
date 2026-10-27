@@ -67,8 +67,14 @@ cached in `data/art`, so the browser never loads anything from external hosts.
 * A track that matches the same Jellyfin song as an earlier track shows as "Same song" and is counted once,
   because the Jellyfin playlist holds each song once. After adding, the playlist is read back; tracks Jellyfin
   did not keep show as "Not added" and the run fails.
-* The Jellyfin playlist is **append-only**: tracks are added, never removed or reordered, so edits you make
-  in Jellyfin are kept. Re-running a sync after Lidarr has finished downloading picks up the new files.
+* By default the Jellyfin playlist is **append-only**: tracks are added, never removed or reordered, so edits
+  you make in Jellyfin are kept. Re-running a sync after Lidarr has finished downloading picks up the new files.
+* With **Mirror in Jellyfin** (playlist Settings, or `--mirror` on the CLI) every sync makes the Jellyfin playlist
+  match the YouTube one instead: songs no track maps to (earlier wrong matches, songs added by hand) and
+  duplicate entries are removed, and the YouTube order is restored. Jellyfin doesn't let an API key move
+  playlist items, so the order is fixed by keeping the part of the playlist that is already right and removing
+  and re-adding everything after it. The mirror is skipped for a sync in which any Jellyfin lookup failed or no
+  track matched, so a hiccup never empties a playlist.
 
 ## Lidarr and Jellyfin notes
 
@@ -93,7 +99,7 @@ start failing. Public playlists and mixes keep syncing without the login if it e
 
 * Mixes (`RD...` playlists, e.g. "Workout Supermix") change over time and may be personalised to the
   account that opened them; each sync reads the current contents. Tracks that disappear from a mix stay in
-  the Jellyfin playlist because it is append-only.
+  the Jellyfin playlist unless Mirror in Jellyfin is on.
 * Tracks that are not on MusicBrainz / in Lidarr's metadata can't be downloaded automatically and show up
   under "Not found in Lidarr"; add those manually.
 * Matching is heuristic. Remixes, live versions and very generic titles can occasionally pick the wrong release.

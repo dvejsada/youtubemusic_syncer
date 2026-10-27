@@ -154,6 +154,7 @@ def run_playlist(pid: int, trigger: str | None = None) -> str | None:
         result = engine.sync_playlist(
             settings, pl["ref"], jellyfin_name=(pl["jellyfin_name"] or None),
             do_lidarr=bool(pl["do_lidarr"]), do_jellyfin=bool(pl["do_jellyfin"]),
+            jellyfin_mirror=bool(pl["jellyfin_mirror"]),
             log=sink, should_stop=_stop.is_set)
     except engine.EngineError as e:
         error = sink.redact(str(e))
@@ -183,6 +184,7 @@ def _record(pid, pl, run_id, result, error, sink) -> str:
             "tracks": len(result.tracks), "lidarr_found": result.lidarr_found,
             "lidarr_failed": result.lidarr_failed, "jellyfin_matched": result.jellyfin_matched,
             "jellyfin_added": result.jellyfin_added, "jellyfin_duplicates": result.jellyfin_duplicates,
+            "jellyfin_removed": result.jellyfin_removed, "jellyfin_moved": result.jellyfin_moved,
             "errors": result.errors,
         }
         if db.get_playlist(pid) and db.replace_tracks(pid, result.tracks):

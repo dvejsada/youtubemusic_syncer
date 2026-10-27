@@ -243,13 +243,15 @@ def ui_log(rid: int):
 
 @ar.post("/playlists/{pid}/settings")
 def save_playlist_settings(session, pid: int, jellyfin_name: str = "", interval_hours: int = 24,
-                           enabled: bool = False, do_lidarr: bool = False, do_jellyfin: bool = False):
+                           enabled: bool = False, do_lidarr: bool = False, do_jellyfin: bool = False,
+                           jellyfin_mirror: bool = False):
     pl = db.get_playlist(pid)
     if not pl:
         return Redirect("/")
     interval_hours = clamp_interval(interval_hours)
     fields = dict(jellyfin_name=jellyfin_name.strip() or None, interval_hours=interval_hours,
-                  enabled=int(enabled), do_lidarr=int(do_lidarr), do_jellyfin=int(do_jellyfin))
+                  enabled=int(enabled), do_lidarr=int(do_lidarr), do_jellyfin=int(do_jellyfin),
+                  jellyfin_mirror=int(jellyfin_mirror))
     last = db.parse_iso(pl["last_run_at"])
     if enabled and last:
         fields["next_run_at"] = db.iso_in_hours(interval_hours, last)

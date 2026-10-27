@@ -33,7 +33,7 @@ PLAYLIST_COLUMNS = {
     "ref", "url", "name", "is_mix", "jellyfin_name", "interval_hours", "enabled", "do_lidarr",
     "do_jellyfin", "queued", "last_run_at", "next_run_at", "last_status", "last_error",
     "track_count", "lidarr_found", "jellyfin_matched", "jellyfin_playlist_id", "cover_url",
-    "jellyfin_duplicates",
+    "jellyfin_duplicates", "jellyfin_mirror",
 }
 
 SCHEMA_V1 = """
@@ -97,7 +97,11 @@ ALTER TABLE playlists ADD COLUMN jellyfin_duplicates INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE tracks ADD COLUMN jellyfin_note TEXT NOT NULL DEFAULT '';
 """
 
-MIGRATIONS = [SCHEMA_V1, SCHEMA_V2, SCHEMA_V3]  # index + 1 == user_version after applying
+SCHEMA_V4 = """
+ALTER TABLE playlists ADD COLUMN jellyfin_mirror INTEGER NOT NULL DEFAULT 0;
+"""
+
+MIGRATIONS = [SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4]  # index + 1 == user_version after applying
 
 _init_lock = threading.Lock()
 
