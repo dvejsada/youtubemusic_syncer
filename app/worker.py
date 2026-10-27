@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import logging
+import os
+import signal
 import threading
 
 from app import db, engine
@@ -84,13 +86,24 @@ def run_pending_once() -> int:
 # ------------------------------------------------------------------- internals
 
 def _loop() -> None:
-    while not _stop.is_set():
-        try:
-            run_pending_once()
-        except Exception:
-            log.exception("worker iteration failed")
-        _wake.wait(POLL_SECONDS)
-        _wake.clear()
+    try:
+        while not _stop.is_set():
+            try:
+                run_pending_once()
+            except Exception:
+                log.exception("worker iteration failed")
+            _wake.wait(POLL_SECONDS)
+            _wake.clear()
+    finally:
+        if not _stop.is_set():
+            # only something like SystemExit gets here (an iteration catches Exception). Without this thread
+            # nothing syncs any more: shut down so the container's restart policy starts a fresh process.
+            log.critical("sync worker died, shutting down so that the app is restarted")
+            _exit_process()
+
+
+def _exit_process() -> None:
+    os.kill(os.getpid(), signal.SIGTERM)  # uvicorn shuts down gracefully on SIGTERM
 
 
 class _LogSink:
@@ -154,7 +167,7 @@ def run_playlist(pid: int, trigger: str | None = None) -> str | None:
         result = engine.sync_playlist(
             settings, pl["ref"], jellyfin_name=(pl["jellyfin_name"] or None),
             do_lidarr=bool(pl["do_lidarr"]), do_jellyfin=bool(pl["do_jellyfin"]),
-            jellyfin_mirror=bool(pl["jellyfin_mirror"]),
+            jellyfin_mirror=bool(pl["jellyfin_mirror"]), jellyfin_playlist_id=pl["jellyfin_playlist_id"] or "",
             log=sink, should_stop=_stop.is_set)
     except engine.EngineError as e:
         error = sink.redact(str(e))

@@ -428,6 +428,26 @@ class TestFullSync:
         assert env.jf.writes == [] and res3.jellyfin_added == 0
         assert env.jf.playlist_by_name("Road Trip")["items"] == ["j-summer", "j-pa", "j-out", "j-omt"]
 
+    def test_saved_playlist_is_used_even_after_a_rename_in_jellyfin(self, env):
+        res1, _ = run(env, do_lidarr=False)
+        pl_id = res1.jellyfin_playlist_id
+        env.jf.playlists[pl_id]["Name"] = "Renamed in Jellyfin"
+        env.jf.add_item("j-out", "Outside", "Calvin Harris", "Motion")
+        res2, lines = run(env, do_lidarr=False, jellyfin_playlist_id=pl_id)
+        assert list(env.jf.playlists) == [pl_id] and res2.jellyfin_playlist_id == pl_id
+        assert env.jf.playlists[pl_id]["items"] == ["j-summer", "j-pa", "j-out"]
+        assert f"  playlist id {pl_id} exists: added 1 new track(s)" in lines
+
+    def test_gone_saved_playlist_falls_back_to_the_name(self, env):
+        res1, _ = run(env, do_lidarr=False)
+        old = env.jf.playlists.pop(res1.jellyfin_playlist_id)
+        res2, _ = run(env, do_lidarr=False, jellyfin_playlist_id=old["Id"])
+        assert res2.jellyfin_playlist_id not in ("", old["Id"])
+        assert env.jf.playlist_by_name("Road Trip")["items"] == ["j-summer", "j-pa"]
+        # an existing playlist with the name is found again instead of creating another one
+        res3, _ = run(env, do_lidarr=False, jellyfin_playlist_id="no-such-id")
+        assert res3.jellyfin_playlist_id == res2.jellyfin_playlist_id and len(env.jf.playlists) == 1
+
     def test_jellyfin_name_override(self, env):
         run(env, do_lidarr=False, jellyfin_name="My Custom Name")
         assert env.jf.playlist_by_name("My Custom Name") is not None

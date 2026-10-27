@@ -99,6 +99,9 @@ for router in routers:
 
 @rt("/health", methods=["GET"])
 def health():
+    # a dead sync thread means nothing syncs any more: report it so Docker restarts the container
+    if not worker.is_alive():
+        return PlainTextResponse("sync worker is not running", status_code=503)
     return PlainTextResponse("ok")
 
 
