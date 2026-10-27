@@ -1,8 +1,8 @@
 """Webhooks from other services (no session login: they authenticate with a token).
 
-POST /hooks/lidarr: Lidarr, Settings, Connect, Webhook ("On Release Import"). The token is passed as
-?token=... or as the webhook's password (HTTP basic auth). After an album import the playlists waiting for
-it get a Jellyfin-only update a moment later (see worker.IMPORT_DELAY).
+POST /hooks/lidarr: Lidarr, Settings, Connect, Webhook ("On Release Import"). The token is the webhook's
+password (HTTP basic auth; recommended, it stays out of access logs) or ?token=.... After an album import the
+playlists waiting for it get a Jellyfin-only update a moment later (see worker.IMPORT_DELAY).
 """
 from __future__ import annotations
 
@@ -13,14 +13,15 @@ import json
 import secrets
 
 from fasthtml.common import APIRouter, Redirect, add_toast
+from starlette.concurrency import run_in_threadpool
 from starlette.responses import JSONResponse, Response
 
 from app import db, worker
 
 ar = APIRouter()
 
-TOKEN_KEY = "webhook_token"
-LAST_KEY = "webhook_last"
+TOKEN_KEY, LAST_KEY = db.WEBHOOK_TOKEN, db.WEBHOOK_LAST
+MAX_SHOWN = 200  # characters of an event's text kept for the Settings page
 
 
 def _given_token(req) -> str:
@@ -43,26 +44,32 @@ def _field(obj, name: str):
 
 @ar.post("/hooks/lidarr")
 async def lidarr_hook(req):
-    token = db.get_meta(TOKEN_KEY)
+    token = await run_in_threadpool(db.get_meta, TOKEN_KEY)
     if not token:
         return Response(status_code=404)  # webhook turned off
     if not hmac.compare_digest(_given_token(req).encode(), token.encode()):
         return Response("invalid token", status_code=401)
     try:
         payload = await req.json()
-    except ValueError:
+    except (ValueError, RecursionError):
         return Response("expected JSON", status_code=400)
     event = str(_field(payload, "eventType") or "")
     artist = str(_field(_field(payload, "artist"), "name") or "")
     album = str(_field(_field(payload, "album"), "title") or "")
+    # the database work runs in a thread, like the other routes (it may wait for the sync worker's writes)
+    queued = await run_in_threadpool(_handle_event, event, artist, album)
+    return JSONResponse({"ok": True, "event": event, "playlists": queued})
+
+
+def _handle_event(event: str, artist: str, album: str) -> list[int]:
     queued: list[int] = []
     if event == "Download":
         queued = db.playlists_waiting_for(artist, album)
         db.schedule_jellyfin_update(queued, worker.IMPORT_DELAY)
-    db.set_meta(LAST_KEY, json.dumps({"at": db.now_iso(), "event": event or "?",
-                                      "album": f"{artist} - {album}" if artist and album else "",
+    db.set_meta(LAST_KEY, json.dumps({"at": db.now_iso(), "event": (event or "?")[:MAX_SHOWN],
+                                      "album": f"{artist} - {album}"[:MAX_SHOWN] if artist and album else "",
                                       "playlists": len(queued)}, ensure_ascii=False))
-    return JSONResponse({"ok": True, "event": event, "playlists": queued})
+    return queued
 
 
 @ar.post("/settings/webhook")

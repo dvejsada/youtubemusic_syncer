@@ -235,6 +235,7 @@ def _sync_jellyfin(jf: Jellyfin, name: str, tracks: list[dict], results: list[Tr
         except Exception as e:
             log(f"  !  {t['title']}: {redact(e)}")
             lookup_failed = True
+            stats["lookup_errors"] = stats.get("lookup_errors", 0) + 1
             consecutive_errors += 1
             if consecutive_errors >= 5:
                 errors.append("Jellyfin: stopped after repeated errors: " + redact(e))

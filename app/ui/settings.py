@@ -110,11 +110,12 @@ def ytm_section(configured: bool):
         id="ytm")
 
 
-def webhook_section(url: str, last: dict | None):
-    """Lidarr webhook: off (a button to turn it on) or the URL to paste into Lidarr and the last event."""
+def webhook_section(hook: tuple[str, str] | None, last: dict | None):
+    """Lidarr webhook: off (a button to turn it on) or the URL and password to enter in Lidarr, and the last
+    event received. hook = (url, token)."""
     desc = ("Lidarr tells Playlist Sync when it has imported an album, so the Jellyfin playlist gets the new "
             "tracks a couple of minutes later instead of at the next scheduled sync.")
-    if not url:
+    if not hook:
         return section("Lidarr webhook", desc,
                        panel(Div("Off.", cls="muted")),
                        panel(Form(btn("Turn on", "plus", "outline", small=True, type="submit"),
@@ -128,10 +129,14 @@ def webhook_section(url: str, last: dict | None):
         seen = "No event received yet: use Test in Lidarr."
     return section(
         "Lidarr webhook", desc,
-        panel(field("Webhook URL", Input(type="text", id="f-hook", value=url, readonly=True, spellcheck="false"),
-                    "In Lidarr: Settings, Connect, +, Webhook. Tick On Release Import, method POST, paste this "
-                    "URL (use an address Lidarr can reach). Keep it secret: the token in it is the password.",
-                    fr="f-hook"),
+        panel(Div(field("URL", Input(type="text", id="f-hook", value=hook[0], readonly=True, spellcheck="false"),
+                        "Use an address Lidarr can reach.", fr="f-hook"),
+                  field("Password", Input(type="text", id="f-hook-pw", value=hook[1], readonly=True,
+                                          spellcheck="false"),
+                        "Any username. Keep it secret.", fr="f-hook-pw"), cls="fields"),
+              Small("In Lidarr: Settings, Connect, +, Webhook. Tick On Release Import, method POST, enter the URL "
+                    "and the password. (Appending ?token=<password> to the URL works too, but then it shows up in "
+                    "access logs.)", cls="muted"),
               Small(seen, cls="muted")),
         panel(Div(Form(btn("New URL", "refresh", "ghost", small=True, type="submit"),
                        action="/settings/webhook", method="post"),
@@ -140,10 +145,11 @@ def webhook_section(url: str, last: dict | None):
         id="webhook")
 
 
-def settings_page_body(s: dict, ytm_configured: bool, hook_url: str = "", hook_last: dict | None = None):
+def settings_page_body(s: dict, ytm_configured: bool, hook: tuple[str, str] | None = None,
+                       hook_last: dict | None = None):
     return (page_header("Settings", "Connections, sync defaults and your YouTube Music login."),
             Div(Form(lidarr_section(s), jellyfin_section(s), syncing_section(s),
                      Div(Small("Applies to Lidarr, Jellyfin and syncing.", cls="muted"),
                          btn("Save settings", "check", type="submit"), cls="save-bar"),
                      action="/settings", method="post", id="settings-form"),
-                webhook_section(hook_url, hook_last), ytm_section(ytm_configured), cls="sections"))
+                webhook_section(hook, hook_last), ytm_section(ytm_configured), cls="sections"))

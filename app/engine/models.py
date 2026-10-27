@@ -50,6 +50,7 @@ class SyncResult:
     jellyfin_duplicates: int = 0     # tracks that are the same Jellyfin song as an earlier track
     jellyfin_removed: int = 0        # mirror: entries removed from the Jellyfin playlist
     jellyfin_moved: int = 0          # mirror: songs re-added to restore the YouTube order
+    jellyfin_lookup_errors: int = 0  # tracks whose Jellyfin search failed (marked "missing" without knowing)
     jellyfin_playlist_id: str = ""
     errors: list[str] = field(default_factory=list)
     status: str = "ok"               # ok | warning (some not found / missing) | error
