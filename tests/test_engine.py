@@ -205,7 +205,8 @@ class TestReadPlaylist:
             yt_track("Summer", ["Calvin Harris"], "Motion")]}}))
         name, is_mix, tracks = read_playlist(Settings(), "https://music.youtube.com/playlist?list=PL1")
         assert (name, is_mix) == ("Mine", False)
-        assert tracks == [{"title": "Summer", "artists": ["Calvin Harris"], "album": "Motion", "thumb": ""}]
+        assert tracks == [{"title": "Summer", "artists": ["Calvin Harris"], "album": "Motion", "thumb": "",
+                          "video_id": ""}]
         assert ("get_watch_playlist", "PL1") not in ytm.calls
 
     def test_mix_falls_back_to_watch_playlist(self, monkeypatch):
@@ -262,7 +263,8 @@ class TestReadPlaylist:
             yt_track("AronChupa - I'm an Albatraoz | OFFICIAL VIDEO (feat. Little Sis Nora)", ["AronChupa"])]}},
             search_results=search))
         _, _, tracks = read_playlist(Settings(), "PLv")
-        assert tracks == [{"title": "I'm an Albatraoz", "artists": ["AronChupa"], "album": "I'm an Albatraoz", "thumb": ""}]
+        assert tracks == [{"title": "I'm an Albatraoz", "artists": ["AronChupa"], "album": "I'm an Albatraoz", "thumb": "",
+                          "video_id": ""}]
 
     def test_search_result_with_wrong_artist_is_ignored(self, monkeypatch):
         install_fake_ytm(monkeypatch, FakeYTM({"PLv": {"title": "V", "tracks": [yt_track("Song", ["Real Artist"])]}},
@@ -581,6 +583,160 @@ class TestJellyfinMatching:
         assert res.status == "error"
         assert res.errors == ["Jellyfin accepted 1 track(s) for playlist 'Road Trip' but did not keep them"]
         assert "    - #2 Calvin Harris, Ellie Goulding - Outside" in lines
+
+
+def _lookups(env) -> list[str]:
+    return [p for m, p in env.lidarr.requests if "album/lookup" in p]
+
+
+def _jf_searches(env) -> list[str]:
+    return [p for m, p in env.jf.requests if "searchTerm" in p and "Audio" in p]
+
+
+class TestIncrementalSync:
+    def test_second_run_reuses_earlier_lookups(self, env, monkeypatch):
+        mb = install_fake_musicbrainz(monkeypatch)
+        cache = engine.Cache()
+        res1, _ = run(env, cache=cache)
+        assert _lookups(env) and mb.queries and _jf_searches(env)
+        assert {k for k, _ in cache.data} == {"lidarr", "jellyfin"}
+        env.lidarr.requests.clear(), env.jf.requests.clear(), mb.queries.clear()
+
+        res2, lines = run(env, cache=cache)
+        assert _lookups(env) == [] and mb.queries == []       # nothing looked up in Lidarr / MusicBrainz again
+        searched = " ".join(_jf_searches(env))
+        assert "Summer" not in searched and "Paranoid" not in searched   # matches confirmed in one request
+        assert "Outside" in searched                                     # not in the library yet: searched
+        s1, s2 = {t.position: t for t in res1.tracks}, {t.position: t for t in res2.tracks}
+        assert [s2[i].lidarr_status for i in range(1, 8)] == \
+            ["monitored", "monitored", "monitored", "downloaded", "monitored", "not_found", "duplicate"]
+        assert all(s2[i].lidarr_release == s1[i].lidarr_release for i in range(1, 8))
+        assert [s2[i].jellyfin_status for i in (1, 4)] == ["in_playlist", "in_playlist"]
+        assert "  (5 of them found by an earlier sync, not looked up again)" in lines
+        assert "  matched 2/7 (2 remembered from earlier syncs)" in lines
+        assert any("Nobody - Nothing  - not on MusicBrainz, add manually (looked up before" in ln for ln in lines)
+
+    def test_not_found_is_looked_up_again_after_a_week(self, env, monkeypatch):
+        clock = {"t": 1_000_000.0}
+        monkeypatch.setattr(engine, "_now", lambda: clock["t"])
+        cache = engine.Cache()
+        run(env, do_jellyfin=False, cache=cache)
+        env.lidarr.requests.clear()
+        clock["t"] += 6 * 86400
+        run(env, do_jellyfin=False, cache=cache)
+        assert not any("Nobody" in p for p in _lookups(env))
+        clock["t"] += 2 * 86400
+        run(env, do_jellyfin=False, cache=cache)
+        assert any("Nobody" in p for p in _lookups(env))
+
+    def test_album_removed_from_lidarr_is_added_again_by_its_id(self, env):
+        cache = engine.Cache()
+        run(env, do_jellyfin=False, cache=cache)
+        env.lidarr.albums = [a for a in env.lidarr.albums if a["foreignAlbumId"] != "alb-lev"]
+        env.lidarr.requests.clear()
+        res, _ = run(env, do_jellyfin=False, cache=cache)
+        assert any("lidarr%3Aalb-lev" in p or "lidarr:alb-lev" in p for p in _lookups(env))
+        assert not any("Levitating" in p for p in _lookups(env))
+        assert res.tracks[4].lidarr_status == "added" and env.lidarr.album_by_foreign("alb-lev")
+
+    def test_jellyfin_item_gone_is_searched_again(self, env):
+        cache = engine.Cache()
+        run(env, do_lidarr=False, cache=cache)
+        env.jf.items = [it for it in env.jf.items if it["Id"] != "j-summer"]
+        res, _ = run(env, do_lidarr=False, cache=cache)
+        assert res.tracks[0].jellyfin_status == "missing"
+
+    def test_jellyfin_match_is_checked_again_when_the_track_changed(self, env):
+        cache = engine.Cache()
+        run(env, do_lidarr=False, cache=cache)
+        env.ytm.playlists["PLtest"]["tracks"][0] = yt_track("Summer", ["Calvin Harris"], "18 Months")
+        env.jf.requests.clear()
+        res, _ = run(env, do_lidarr=False, cache=cache)
+        assert "Summer" in " ".join(_jf_searches(env))   # album changed: searched, not reused
+        assert res.tracks[0].jellyfin_status == "in_playlist"
+
+    def test_jellyfin_match_is_checked_again_after_a_week_and_kept_if_nothing_better(self, env, monkeypatch):
+        clock = {"t": 1_000_000.0}
+        monkeypatch.setattr(engine, "_now", lambda: clock["t"])
+        cache = engine.Cache()
+        run(env, do_lidarr=False, cache=cache)
+        env.jf.requests.clear()
+        clock["t"] += 8 * 86400
+        env.jf.items[0]["Name"] = "Sumer"   # renamed in Jellyfin: the search no longer finds it
+        res, _ = run(env, do_lidarr=False, cache=cache)
+        assert "Summer" in " ".join(_jf_searches(env))     # older than a week: searched again
+        assert res.tracks[0].jellyfin_item_id == "j-summer" and res.tracks[0].jellyfin_status == "in_playlist"
+
+    def test_cache_loads_only_the_entries_a_sync_needs(self, env):
+        cache = engine.Cache()
+        run(env, cache=cache)
+        stored = dict(cache.data)
+        calls = []
+
+        def loader(kind, keys):
+            calls.append((kind, list(keys)))
+            return {k: v for (kd, k), v in stored.items() if kd == kind and k in keys}
+        res, lines = run(env, cache=engine.Cache(loader=loader))
+        assert [kind for kind, _ in calls] == ["lidarr", "jellyfin"]   # one batch per phase
+        assert len(calls[1][1]) == 7 and "  matched 2/7 (2 remembered from earlier syncs)" in lines
+        assert engine.Cache(loader=lambda k, keys: 1 / 0).prefetch("ytm", ["a"]) is None  # a broken store is ignored
+
+    def test_entries_of_another_version_are_ignored(self):
+        cache = engine.Cache({("jellyfin", "k"): {"id": "x", "v": engine.CACHE_VERSION - 1}})
+        assert cache.get("jellyfin", "k") is None
+        cache.put("jellyfin", "k", {"id": "y"})
+        assert cache.get("jellyfin", "k")["id"] == "y" and cache.changed == {("jellyfin", "k")}
+
+    def test_song_version_of_a_video_is_searched_once(self, monkeypatch):
+        def search(query, flt):
+            return [{"title": "I'm an Albatraoz", "artists": [{"name": "AronChupa"}],
+                     "album": {"name": "I'm an Albatraoz"}}]
+        tracks = [yt_track("AronChupa - I'm an Albatraoz | OFFICIAL VIDEO", ["AronChupa"], video_id="vid-1")]
+        ytm = install_fake_ytm(monkeypatch, FakeYTM({"PLv": {"title": "V", "tracks": tracks}}, search_results=search))
+        cache = engine.Cache()
+        first = engine.read_playlist_full(Settings(), "PLv", cache=cache)[2]
+        second = engine.read_playlist_full(Settings(), "PLv", cache=cache)[2]
+        assert first == second and second[0]["album"] == "I'm an Albatraoz" and second[0]["video_id"] == "vid-1"
+        assert [c for c in ytm.calls if c[0] == "search"] == [("search", "AronChupa I'm an Albatraoz")]
+        tracks[0]["title"] = "AronChupa - I'm an Albatraoz (Remastered)"   # changed on YouTube: asked again
+        engine.read_playlist_full(Settings(), "PLv", cache=cache)
+        assert len([c for c in ytm.calls if c[0] == "search"]) == 2
+
+
+class TestDeferredLidarrFinalize:
+    def test_sync_does_not_wait_and_reports_pending_albums(self, env):
+        env.lidarr.busy_polls = 5
+        res, lines = run(env, do_jellyfin=False, wait_for_lidarr=False)
+        assert res.lidarr_pending == ["alb-lev", "alb-motion"]
+        assert not any("command" in p for m, p in env.lidarr.requests if m == "GET")   # no polling
+        assert not any("Waiting for Lidarr" in ln for ln in lines)
+        assert any("2 album(s) of new artists will be monitored and searched" in ln for ln in lines)
+
+    def test_step_waits_while_lidarr_is_busy_then_monitors(self, env):
+        res, _ = run(env, do_jellyfin=False, wait_for_lidarr=False)
+        env.lidarr.busy_polls = 1
+        env.lidarr.clear_writes()
+        step = engine.lidarr_finalize_step(env.settings, res.lidarr_pending + ["alb-unknown"])
+        assert step.busy and env.lidarr.writes == []
+        step = engine.lidarr_finalize_step(env.settings, res.lidarr_pending + ["alb-unknown"])
+        assert not step.busy and sorted(step.done) == ["alb-lev", "alb-motion"] and step.missing == ["alb-unknown"]
+        assert step.unmonitored == 2
+        assert env.lidarr.album_by_foreign("alb-motion")["monitored"]
+        assert set(env.lidarr.searched_album_ids()) == {env.lidarr.album_by_foreign(f)["id"]
+                                                        for f in ("alb-lev", "alb-motion")}
+
+    def test_step_asks_lidarr_only_for_the_pending_albums(self, env):
+        res, _ = run(env, do_jellyfin=False, wait_for_lidarr=False)
+        env.lidarr.requests.clear()
+        engine.lidarr_finalize_step(env.settings, res.lidarr_pending)
+        album_gets = [p for m, p in env.lidarr.requests if m == "GET" and "/api/v1/album" in p]
+        assert sorted(album_gets) == ["/api/v1/album?foreignAlbumId=alb-lev", "/api/v1/album?foreignAlbumId=alb-motion"]
+
+    def test_forced_step_ignores_a_busy_lidarr(self, env):
+        res, _ = run(env, do_jellyfin=False, wait_for_lidarr=False)
+        env.lidarr.busy_polls = 5
+        assert sorted(engine.lidarr_finalize_step(env.settings, res.lidarr_pending, force=True).done) == \
+            ["alb-lev", "alb-motion"]
 
 
 class TestJellyfinMirror:

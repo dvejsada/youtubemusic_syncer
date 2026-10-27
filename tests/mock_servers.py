@@ -196,6 +196,8 @@ class MockLidarr(_Server):
             if p == "album":
                 if "artistId" in q:
                     return 200, [a for a in self.albums if a["artistId"] == int(q["artistId"])]
+                if "foreignAlbumId" in q:
+                    return 200, [a for a in self.albums if a["foreignAlbumId"] == q["foreignAlbumId"]]
                 return 200, self.albums
             if p == "album/lookup":
                 return 200, self.lookups.get(unquote(q.get("term", "")), [])
@@ -278,6 +280,9 @@ class MockJellyfin(_Server):
         if method == "GET" and path == "/Items":
             if self.fail_items:
                 return 500, {"error": "boom"}
+            if "ids" in q:  # lookup of known items
+                wanted = set(q["ids"].split(","))
+                return 200, {"Items": [it for it in self.items if it["Id"] in wanted]}
             term = q.get("searchTerm", "").lower()
             if term in self.fail_search_terms:
                 return 500, {"error": "boom"}
@@ -405,10 +410,12 @@ class MockImages:
 
 # ------------------------------------------------- YouTube Music / MusicBrainz
 
-def yt_track(title, artists, album=None, thumbnails=None, thumb_key="thumbnails"):
+def yt_track(title, artists, album=None, thumbnails=None, thumb_key="thumbnails", video_id=None):
     """A track dict shaped like ytmusicapi's playlist items (thumb_key="thumbnail" for watch-queue items)."""
     t = {"title": title, "artists": [{"name": a, "id": None} for a in artists],
          "album": {"name": album, "id": "x"} if album else None}
+    if video_id:
+        t["videoId"] = video_id
     if thumbnails is not None:
         t[thumb_key] = thumbnails
     return t

@@ -60,7 +60,15 @@ cached in `data/art`, so the browser never loads anything from external hosts.
 * Candidates are scored by title and artist similarity; a result with the wrong artist is rejected
   instead of downloading a random album.
 * Tracks of the same album are grouped: the album is added to Lidarr once, monitored and a search is
-  triggered. Lidarr first has to import new artists, so the app waits (default 20 minutes) before monitoring.
+  triggered. Lidarr's import of a new artist unmonitors its albums, so albums of new artists are monitored
+  and searched again once Lidarr has finished importing. The sync doesn't wait for that: a background check
+  every 30 seconds does it (up to the Lidarr import wait in Settings, default 20 minutes) and adds a
+  `[later]` line to the run's log. The CLI still waits.
+* Syncs are incremental: what earlier syncs found (the song version of a video, the Lidarr release of an
+  album, the Jellyfin item of a track) is remembered, so a sync only looks up tracks that are new or not
+  resolved yet. Albums in Lidarr's library come from a single request; remembered Jellyfin matches are
+  confirmed in one request. Lookups that found nothing are tried again after a week. *Re-check all tracks*
+  (playlist Settings) makes the next sync of that playlist look everything up again.
 * In Jellyfin each track is matched against the library of the configured user: the title and one of the
   artists both have to match on their own (the album only breaks ties), so a different song by the same artist
   or a cover by someone else is not taken. Only tracks that are already in the library are added, in playlist order.

@@ -8,6 +8,7 @@ import json
 import os
 import sqlite3
 import threading
+import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -33,7 +34,7 @@ PLAYLIST_COLUMNS = {
     "ref", "url", "name", "is_mix", "jellyfin_name", "interval_hours", "enabled", "do_lidarr",
     "do_jellyfin", "queued", "last_run_at", "next_run_at", "last_status", "last_error",
     "track_count", "lidarr_found", "jellyfin_matched", "jellyfin_playlist_id", "cover_url",
-    "jellyfin_duplicates", "jellyfin_mirror",
+    "jellyfin_duplicates", "jellyfin_mirror", "full_recheck",
 }
 
 SCHEMA_V1 = """
@@ -101,7 +102,24 @@ SCHEMA_V4 = """
 ALTER TABLE playlists ADD COLUMN jellyfin_mirror INTEGER NOT NULL DEFAULT 0;
 """
 
-MIGRATIONS = [SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4]  # index + 1 == user_version after applying
+SCHEMA_V5 = """
+ALTER TABLE playlists ADD COLUMN full_recheck INTEGER NOT NULL DEFAULT 0;
+CREATE TABLE IF NOT EXISTS lookup_cache (
+    kind TEXT NOT NULL,
+    key TEXT NOT NULL,
+    value TEXT NOT NULL,
+    PRIMARY KEY (kind, key)
+);
+CREATE TABLE IF NOT EXISTS lidarr_pending (
+    foreign_album_id TEXT PRIMARY KEY,
+    lidarr_url TEXT NOT NULL,
+    playlist_id INTEGER,
+    run_id INTEGER,
+    added_at TEXT NOT NULL
+);
+"""
+
+MIGRATIONS = [SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5]  # index + 1 == user_version after applying
 
 _init_lock = threading.Lock()
 
@@ -382,6 +400,64 @@ def track_stats(pid: int) -> dict:
             " SUM(jellyfin_status='duplicate') AS jf_dup"
             " FROM tracks WHERE playlist_id=?", (pid,)).fetchone()
     return {k: (r[k] or 0) for k in r.keys()}
+
+
+# ------------------------------------------------------------ lookup cache
+
+def load_cache_entries(kind: str, keys: list[str]) -> dict:
+    """The remembered lookups of one kind for these keys, {key: value} (engine.Cache's loader)."""
+    out = {}
+    with connect() as c:
+        for k in range(0, len(keys), 500):
+            chunk = keys[k:k + 500]
+            for r in c.execute(f"SELECT key, value FROM lookup_cache WHERE kind=? AND key IN "
+                               f"({','.join('?' * len(chunk))})", (kind, *chunk)):
+                try:
+                    out[r["key"]] = json.loads(r["value"])
+                except ValueError:
+                    pass
+    return out
+
+
+def prune_cache(version: int, max_age_days: float) -> int:
+    """Forget lookups of another cache version or older than max_age_days (they are looked up again when
+    needed). Returns how many were removed."""
+    cutoff = time.time() - max_age_days * 86400
+    with connect() as c:
+        cur = c.execute("DELETE FROM lookup_cache WHERE CASE WHEN json_valid(value) THEN"
+                        " json_extract(value, '$.v') IS NOT ? OR COALESCE(json_extract(value, '$.at'), 0) < ?"
+                        " ELSE 1 END", (version, cutoff))
+        return cur.rowcount
+
+
+def save_cache(entries: dict) -> None:
+    if not entries:
+        return
+    rows = [(kind, key, json.dumps(v, ensure_ascii=False)) for (kind, key), v in entries.items()]
+    with connect() as c:
+        c.execute("BEGIN IMMEDIATE")
+        c.executemany("INSERT OR REPLACE INTO lookup_cache(kind, key, value) VALUES (?, ?, ?)", rows)
+        c.execute("COMMIT")
+
+
+# ---------------------------------------------------- Lidarr albums to finish
+
+def add_lidarr_pending(foreign_album_ids, lidarr_url: str, playlist_id: int, run_id: int) -> None:
+    ts = now_iso()
+    with connect() as c:
+        c.executemany("INSERT OR REPLACE INTO lidarr_pending(foreign_album_id, lidarr_url, playlist_id, run_id,"
+                      " added_at) VALUES (?, ?, ?, ?, ?)",
+                      [(f, lidarr_url, playlist_id, run_id, ts) for f in foreign_album_ids])
+
+
+def lidarr_pending() -> list[dict]:
+    with connect() as c:
+        return _rows(c.execute("SELECT * FROM lidarr_pending ORDER BY added_at, foreign_album_id"))
+
+
+def remove_lidarr_pending(foreign_album_ids) -> None:
+    with connect() as c:
+        c.executemany("DELETE FROM lidarr_pending WHERE foreign_album_id=?", [(f,) for f in foreign_album_ids])
 
 
 # --------------------------------------------------------------------- runs

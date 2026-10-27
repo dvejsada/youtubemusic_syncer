@@ -77,7 +77,8 @@ def syncing_section(s: dict):
                   field("Lidarr import wait (minutes)",
                         Input(type="number", id="f-wait", name="finalize_timeout_min", min="1", max="240",
                               value=s["finalize_timeout_min"]),
-                        "How long to wait for Lidarr to import new artists before giving up.", fr="f-wait"),
+                        "How long to wait for Lidarr to import new artists before monitoring their albums anyway. "
+                        "Syncs don't wait for it; this is checked in the background.", fr="f-wait"),
                   cls="fields")))
 
 
