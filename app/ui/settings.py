@@ -4,6 +4,7 @@ from __future__ import annotations
 from fasthtml.common import (Code, Details, Div, Form, Input, Li, Ol, Option, Select, Small, Span, Strong, Summary,
                              Textarea)
 
+from app.config import flag
 from app.ui.core import badge, btn, field, icon, interval_select, page_header, panel, rel_text, section, switch
 
 
@@ -73,7 +74,7 @@ def jellyfin_section(s: dict):
                     fr="f-juser"),
               switch("jellyfin_cover", "Use the YouTube cover as playlist image",
                      "Set again only when the YouTube cover changes, so an image you pick in Jellyfin stays "
-                     "until then. Mixes have no cover.", s["jellyfin_cover"] not in ("", "0"))),
+                     "until then. Mixes have no cover.", flag(s["jellyfin_cover"]))),
         test_footer("jellyfin"))
 
 

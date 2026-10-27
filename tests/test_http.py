@@ -128,6 +128,21 @@ def test_writes_can_send_a_raw_body_with_its_type(waits):
     assert http.s.calls[0][5] is None   # JSON writes keep requests' own Content-Type
 
 
+def test_flag():
+    from app.config import flag
+    assert [flag(v) for v in ("1", "on", "yes", "True", " 1 ")] == [True] * 5
+    assert [flag(v) for v in ("", "0", "false", "No", "OFF", None)] == [False] * 6
+
+
+def test_url_allowed():
+    from app.engine.http import YOUTUBE_IMAGE_HOSTS, url_allowed
+    ok = ("https://lh3.googleusercontent.com/x=w544", "https://i.ytimg.com/vi/x/hq.jpg", "https://ggpht.com/a")
+    assert all(url_allowed(u, YOUTUBE_IMAGE_HOSTS, ("https",)) for u in ok)
+    bad = ("http://i.ytimg.com/a", "https://evilytimg.com/a", "https://ytimg.com.evil.net/a", "https://[::1/a",
+           "javascript:alert(1)", "")
+    assert not any(url_allowed(u, YOUTUBE_IMAGE_HOSTS, ("https",)) for u in bad)
+
+
 def test_fetch_image():
     from mock_servers import MockImages
     from app.engine.http import fetch_image
@@ -135,7 +150,7 @@ def test_fetch_image():
     try:
         body, ctype = fetch_image(f"{srv.url}/cover", max_bytes=10 ** 6)
         assert ctype == "image/png" and body == srv._png["/cover"]
-        for path in ("/missing", "/text", "/huge"):
+        for path in ("/missing", "/text", "/huge", "/redirect"):   # redirects are not followed
             assert fetch_image(f"{srv.url}{path}", max_bytes=2 * 1024 * 1024) is None
         assert fetch_image(f"{srv.url}/cover", max_bytes=10) is None
         assert fetch_image(f"{srv.url}/cover", max_bytes=10 ** 6, types=("image/jpeg",)) is None

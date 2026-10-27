@@ -6,12 +6,13 @@ from dataclasses import dataclass, field
 
 from app.engine.cache import Cache
 from app.engine.common import _CHECK_TIMEOUT, _NOLOG, ApiError, EngineError, _base_url, _fatal, _redactor
-from app.engine.http import Http, fetch_image
-
-COVER_MAX_BYTES = 5 * 1024 * 1024
-COVER_SCHEMES = ("https://",)  # module-level so tests can allow their http image server
+from app.engine.http import YOUTUBE_IMAGE_HOSTS, Http, fetch_image, url_allowed
 from app.engine.matching import DASH_SUFFIX, NOISE, norm, sim
 from app.engine.models import Settings, TrackResult
+
+COVER_MAX_BYTES = 5 * 1024 * 1024
+# where a playlist cover may be fetched from (module-level so tests can allow their http image server)
+COVER_HOSTS, COVER_SCHEMES = YOUTUBE_IMAGE_HOSTS, ("https",)
 
 
 @dataclass
@@ -315,30 +316,28 @@ def _sync_jellyfin(jf: Jellyfin, name: str, tracks: list[dict], results: list[Tr
     return playlist_id, stats
 
 
-def _sync_cover(jf: Jellyfin, playlist_id: str, cover_url: str, cache: Cache, log, redact) -> None:
-    """Make the YouTube cover the Jellyfin playlist's image. Only when it differs from the cover set by an
-    earlier sync (`cache`): an image chosen in Jellyfin stays until the YouTube cover changes. Failures are
-    logged and otherwise ignored, the playlist itself is fine."""
-    if not cover_url.startswith(COVER_SCHEMES):
-        return
-    key = f"{jf.url}|{playlist_id}"
-    cache.prefetch("jellyfin_cover", [key])
-    if (cache.get("jellyfin_cover", key) or {}).get("url") == cover_url:
-        return
+def _sync_cover(jf: Jellyfin, playlist_id: str, cover_url: str, cover_set: str, log, redact) -> str:
+    """Make the YouTube cover the Jellyfin playlist's image, unless `cover_set` (what an earlier sync set,
+    see SyncResult.jellyfin_cover_set) says it already is: an image chosen in Jellyfin stays until the YouTube
+    cover changes. Returns the new `cover_set`. Failures are logged and otherwise ignored (the playlist itself
+    is fine) and retried by the next sync."""
+    done = f"{jf.url}|{playlist_id}|{cover_url}"
+    if cover_set == done or not url_allowed(cover_url, COVER_HOSTS, COVER_SCHEMES):
+        return cover_set
     if jf.dry:
         log("  would set the playlist image to the YouTube cover")
-        return
+        return cover_set
     try:
         got = fetch_image(cover_url, max_bytes=COVER_MAX_BYTES)
         if not got:
             log("  !  could not download the YouTube cover, the playlist image is left as it is")
-            return
+            return cover_set
         jf.set_image(playlist_id, *got)
     except Exception as e:
         log(f"  !  could not set the playlist image: {redact(e)}")
-        return
-    cache.put("jellyfin_cover", key, {"url": cover_url})
+        return cover_set
     log("  set the playlist image to the YouTube cover")
+    return done
 
 
 def check_jellyfin(settings: Settings) -> tuple[bool, str]:

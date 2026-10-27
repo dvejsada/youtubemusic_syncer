@@ -58,3 +58,4 @@ class SyncResult:
     stopped: bool = False            # extra: should_stop() aborted the run early
     lidarr_pending: list[str] = field(default_factory=list)  # wait_for_lidarr=False: for lidarr_finalize_step
     cover_url: str = ""              # YouTube Music playlist cover (source URL); "" for mixes
+    jellyfin_cover_set: str = ""     # what the Jellyfin playlist image was set from: "<jellyfin url>|<id>|<cover>"

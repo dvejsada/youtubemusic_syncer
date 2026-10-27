@@ -17,5 +17,10 @@ def clamp_interval(hours: int) -> int:
     return clamp(hours, 1, MAX_INTERVAL_HOURS)
 
 
+def flag(value: str) -> bool:
+    """A yes/no setting: "", "0", "false", "no" and "off" (any case) are no."""
+    return (value or "").strip().lower() not in ("", "0", "false", "no", "off")
+
+
 def clean_url(u: str) -> str:
     return (u or "").strip().rstrip("/")

@@ -865,66 +865,72 @@ class TestJellyfinCover:
     def images(self, env, monkeypatch):
         from mock_servers import MockImages
         srv = MockImages().start()
-        monkeypatch.setattr(engine.jellyfin, "COVER_SCHEMES", ("http://",))
+        monkeypatch.setattr(engine.jellyfin, "COVER_HOSTS", (srv.host,))
+        monkeypatch.setattr(engine.jellyfin, "COVER_SCHEMES", ("http",))
         env.ytm.playlists["PLtest"]["thumbnails"] = srv.thumbs("cover-a")
         yield srv
         srv.stop()
 
     def test_cover_is_uploaded_once_and_again_when_it_changes(self, env, images):
-        cache = engine.Cache()
-        res, lines = run(env, do_lidarr=False, cache=cache)
+        res, lines = run(env, do_lidarr=False)
         pid = res.jellyfin_playlist_id
         assert env.jf.images[pid] == ("image/png", images._png["/cover-a"])   # the largest thumbnail
         assert "  set the playlist image to the YouTube cover" in lines and res.status == "warning"
+        assert res.jellyfin_cover_set == f"{env.jf.url}|{pid}|{images.url}/cover-a?s=120"
         env.jf.images.clear()
-        res, lines = run(env, do_lidarr=False, cache=cache, jellyfin_playlist_id=pid)
+        again, lines = run(env, do_lidarr=False, jellyfin_playlist_id=pid, jellyfin_cover_set=res.jellyfin_cover_set)
         assert env.jf.images == {} and not any("playlist image" in ln for ln in lines)
+        assert again.jellyfin_cover_set == res.jellyfin_cover_set
         env.ytm.playlists["PLtest"]["thumbnails"] = images.thumbs("cover-b")
-        run(env, do_lidarr=False, cache=cache, jellyfin_playlist_id=pid)
+        run(env, do_lidarr=False, jellyfin_playlist_id=pid, jellyfin_cover_set=res.jellyfin_cover_set)
         assert env.jf.images[pid] == ("image/png", images._png["/cover-b"])
 
-    def test_remembered_per_playlist(self, env, images):
-        cache = engine.Cache()
-        first = run(env, do_lidarr=False, cache=cache)[0].jellyfin_playlist_id
-        del env.jf.playlists[first]   # deleted in Jellyfin: a new playlist is created and gets the cover too
-        second = run(env, do_lidarr=False, cache=cache, jellyfin_playlist_id=first)[0].jellyfin_playlist_id
-        assert second != first and second in env.jf.images
+    def test_a_new_jellyfin_playlist_gets_the_cover_too(self, env, images):
+        first = run(env, do_lidarr=False)[0]
+        del env.jf.playlists[first.jellyfin_playlist_id]   # deleted in Jellyfin: a new playlist is created
+        second = run(env, do_lidarr=False, jellyfin_playlist_id=first.jellyfin_playlist_id,
+                     jellyfin_cover_set=first.jellyfin_cover_set)[0]
+        assert second.jellyfin_playlist_id != first.jellyfin_playlist_id
+        assert second.jellyfin_playlist_id in env.jf.images
 
     def test_turned_off_dry_run_and_mixes_upload_nothing(self, env, images):
         env.settings.jellyfin_cover = False
-        run(env, do_lidarr=False)
+        assert run(env, do_lidarr=False)[0].jellyfin_cover_set == ""
         env.settings.jellyfin_cover = True
-        _, lines = run(env, do_lidarr=False, dry_run=True)
-        assert "  would set the playlist image to the YouTube cover" in lines
+        res, lines = run(env, do_lidarr=False, dry_run=True)
+        assert "  would set the playlist image to the YouTube cover" in lines and res.jellyfin_cover_set == ""
         env.ytm.playlists["PLtest"].pop("thumbnails")
         run(env, do_lidarr=False)
         assert env.jf.images == {} and images.requests == []
 
-    def test_only_https_covers(self, env, images, monkeypatch):
-        monkeypatch.setattr(engine.jellyfin, "COVER_SCHEMES", ("https://",))
+    def test_only_youtube_image_hosts_over_https(self, env, images, monkeypatch):
+        monkeypatch.setattr(engine.jellyfin, "COVER_SCHEMES", ("https",))
+        run(env, do_lidarr=False)
+        monkeypatch.setattr(engine.jellyfin, "COVER_SCHEMES", ("http",))
+        monkeypatch.setattr(engine.jellyfin, "COVER_HOSTS", engine.http.YOUTUBE_IMAGE_HOSTS)
         run(env, do_lidarr=False)
         assert env.jf.images == {} and images.requests == []
 
     @pytest.mark.parametrize("problem", ["upload", "download"])
     def test_a_failure_is_logged_and_retried_next_time(self, env, images, problem):
-        cache = engine.Cache()
         if problem == "upload":
             env.jf.fail_images = True
         else:
             env.ytm.playlists["PLtest"]["thumbnails"] = [{"url": f"{images.url}/missing", "width": 500}]
-        res, lines = run(env, do_lidarr=False, cache=cache)
+        res, lines = run(env, do_lidarr=False)
         assert res.status == "warning" and not res.errors and res.jellyfin_matched == 2   # the playlist is fine
         assert any(ln.startswith("  !  could not") and ("image" in ln or "cover" in ln) for ln in lines)
-        assert env.jf.images == {}
+        assert env.jf.images == {} and res.jellyfin_cover_set == ""
         env.jf.fail_images = False
         env.ytm.playlists["PLtest"]["thumbnails"] = images.thumbs("cover-a")
-        run(env, do_lidarr=False, cache=cache, jellyfin_playlist_id=res.jellyfin_playlist_id)
+        run(env, do_lidarr=False, jellyfin_playlist_id=res.jellyfin_playlist_id)
         assert res.jellyfin_playlist_id in env.jf.images
 
     def test_api_key_is_not_logged_on_failure(self, env, images):
-        env.jf.fail_images = True
+        env.jf.fail_images = True   # the mock's error answer repeats the Authorization header
         _, lines = run(env, do_lidarr=False)
-        assert not any(JK in ln for ln in lines)
+        failed = [ln for ln in lines if "could not set the playlist image" in ln]
+        assert failed and "MediaBrowser Token" in failed[0] and JK not in failed[0]
 
 
 class TestStopAndTimeouts:

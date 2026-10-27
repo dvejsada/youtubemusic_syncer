@@ -21,12 +21,12 @@ from fasthtml.common import APIRouter
 from starlette.responses import FileResponse, Response
 
 from app import db
-from app.engine.http import fetch_image
+from app.engine.http import YOUTUBE_IMAGE_HOSTS, fetch_image, url_allowed
 
 ar = APIRouter()
 
 # Module-level so tests and the demo can patch them (host suffixes match "host" and "*.host").
-ALLOWED_HOSTS: tuple[str, ...] = ("googleusercontent.com", "ytimg.com", "ggpht.com")
+ALLOWED_HOSTS: tuple[str, ...] = YOUTUBE_IMAGE_HOSTS
 ALLOWED_SCHEMES: tuple[str, ...] = ("https",)
 
 MAX_BYTES = 2 * 1024 * 1024
@@ -44,16 +44,8 @@ _failed: dict[str, float] = {}  # url -> monotonic time of the last failure
 _failed_lock = threading.Lock()
 
 
-def _host_ok(host: str) -> bool:
-    return any(host == h or host.endswith("." + h) for h in ALLOWED_HOSTS)
-
-
 def is_allowed(url: str) -> bool:
-    try:
-        p = urlsplit(url)
-        return p.scheme in ALLOWED_SCHEMES and bool(p.hostname) and _host_ok(p.hostname.lower())
-    except ValueError:
-        return False
+    return url_allowed(url, ALLOWED_HOSTS, ALLOWED_SCHEMES)
 
 
 def resize(url: str, px: int) -> str:

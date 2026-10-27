@@ -302,8 +302,8 @@ class MockJellyfin(_Server):
             return 200, {"Id": pid}
         m = re.fullmatch(r"/Items/([^/]+)/Images/Primary", path)
         if m and method == "POST":  # like Jellyfin: the body is the image, base64-encoded
-            if self.fail_images:
-                return 500, {"error": "boom"}
+            if self.fail_images:  # with the credentials in the answer, like a misconfigured proxy might
+                return 500, {"error": "boom", "auth": headers.get("Authorization", "")}
             if m.group(1) not in self.playlists:
                 return 404, {}
             ctype = headers.get("Content-Type", "")
@@ -363,7 +363,8 @@ def png_bytes(path: str, size: int = 160) -> bytes:
 
 class MockImages:
     """Image server for artwork. Every path gets its own generated PNG (query string ignored);
-    /text answers text/plain, /huge an image larger than the 2 MB cap, /missing a 404.
+    /text answers text/plain, /huge an image larger than the 2 MB cap, /missing a 404, /redirect a 302 to an
+    image.
 
     requests: paths served (with query), for cache-hit assertions.
     """
@@ -386,6 +387,12 @@ class MockImages:
                 ctype, body, status = "image/png", None, 200
                 if path == "/missing":
                     status, ctype, body = 404, "text/plain", b"nope"
+                elif path == "/redirect":
+                    self.send_response(302)
+                    self.send_header("Location", "/cover")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
                 elif path == "/text":
                     ctype, body = "text/plain", b"not an image"
                 elif path == "/huge":

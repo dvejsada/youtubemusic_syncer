@@ -543,6 +543,28 @@ class TestRobustness:
 
 
 class TestWorker:
+    def test_cover_is_set_once_also_across_full_rechecks_and_import_runs(self, client, servers, monkeypatch):
+        from mock_servers import MockImages
+        images = MockImages().start()
+        try:
+            monkeypatch.setattr(engine.jellyfin, "COVER_HOSTS", (images.host,))
+            monkeypatch.setattr(engine.jellyfin, "COVER_SCHEMES", ("http",))
+            fake_ytm(monkeypatch).playlists["PLroad"]["thumbnails"] = images.thumbs("cover-a")
+            pid = add_pl()
+            worker.run_pending_once()
+            pl = db.get_playlist(pid)
+            assert pl["jellyfin_cover_set"].endswith("/cover-a?s=120")
+            assert pl["jellyfin_playlist_id"] in servers.jf.images
+            servers.jf.images.clear()
+            db.update_playlist(pid, full_recheck=1, queued=1)   # the lookup cache starts empty: the image doesn't
+            worker.run_pending_once()
+            db.update_playlist(pid, jellyfin_due_at=db.now_iso())   # a Jellyfin-only run after a Lidarr import
+            worker.run_pending_once()
+            assert [r["trigger"] for r in db.list_runs(pid)][:2] == ["import", "manual"]
+            assert servers.jf.images == {} and db.get_playlist(pid)["full_recheck"] == 0
+        finally:
+            images.stop()
+
     def test_run_stores_tracks_and_run(self, client, servers, monkeypatch):
         fake_ytm(monkeypatch)
         pid = add_pl()
@@ -1163,6 +1185,13 @@ class TestSettings:
         assert (s["default_interval_hours"], s["finalize_timeout_min"], s["lidarr_root"]) == ("12", "30", "/music")
         assert "Settings saved" in client.get("/settings").text
         assert "Settings saved" not in client.get("/settings").text  # flash shows once
+
+    def test_jellyfin_cover_seed_accepts_words(self, monkeypatch):
+        with db.connect() as c:   # a fresh install: seeded from the environment on the first start
+            c.execute("DELETE FROM settings")
+        monkeypatch.setenv("JELLYFIN_COVER", "false")
+        db.init_db()
+        assert db.get_settings()["jellyfin_cover"] == "false" and db.engine_settings().jellyfin_cover is False
 
     def test_cover_switch_and_lidarr_link_address(self, client, servers):
         assert 'name="jellyfin_cover" checked' in client.get("/settings").text   # on by default

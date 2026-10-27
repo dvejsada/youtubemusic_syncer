@@ -201,7 +201,7 @@ def run_playlist(pid: int, trigger: str | None = None) -> str | None:
             settings, pl["ref"], jellyfin_name=(pl["jellyfin_name"] or None),
             do_lidarr=bool(pl["do_lidarr"]) and not jellyfin_only, do_jellyfin=bool(pl["do_jellyfin"]),
             jellyfin_mirror=bool(pl["jellyfin_mirror"]), jellyfin_playlist_id=pl["jellyfin_playlist_id"] or "",
-            cache=cache, wait_for_lidarr=False,
+            jellyfin_cover_set=pl["jellyfin_cover_set"] or "", cache=cache, wait_for_lidarr=False,
             log=sink, should_stop=_stop.is_set)
     except engine.EngineError as e:
         error = sink.redact(str(e))
@@ -217,6 +217,12 @@ def run_playlist(pid: int, trigger: str | None = None) -> str | None:
         db.save_cache({k: cache.data[k] for k in cache.changed})
     except Exception:
         log.exception("could not save the lookup cache")
+    if result is not None and result.jellyfin_cover_set != (pl["jellyfin_cover_set"] or ""):
+        try:  # whatever else the run recorded: the image was set
+            if db.get_playlist(pid):
+                db.update_playlist(pid, jellyfin_cover_set=result.jellyfin_cover_set)
+        except Exception:
+            log.exception("could not save which cover the Jellyfin playlist got (it is set again next time)")
     if result is not None and result.lidarr_pending:
         try:
             db.add_lidarr_pending(result.lidarr_pending, engine.lidarr_base_url(settings), pid, run_id)

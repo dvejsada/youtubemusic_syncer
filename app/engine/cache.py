@@ -11,9 +11,8 @@ RETRY_DAYS = 7      # a lookup that found nothing, or a Jellyfin match, is looke
 class Cache:
     """Lookups remembered between syncs, {(kind, key): value}, so a sync only looks up what is new or
     unresolved. kinds: "ytm" (song version of a YouTube video), "lidarr" (release of an album group),
-    "jellyfin" (library item of a track), "jellyfin_cover" (cover set as a playlist's image). The app passes
-    a `loader(kind, keys) -> {key: value}` that reads the entries a phase needs (see prefetch) and saves
-    `changed` afterwards."""
+    "jellyfin" (library item of a track). The app passes a `loader(kind, keys) -> {key: value}` that reads
+    the entries a phase needs (see prefetch) and saves `changed` afterwards."""
 
     def __init__(self, data: dict | None = None, loader=None):
         self.data = data if data is not None else {}

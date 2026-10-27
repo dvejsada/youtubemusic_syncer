@@ -2,6 +2,8 @@
 reads that hit a busy server, and errors as ApiError (carrying the HTTP status for _fatal)."""
 from __future__ import annotations
 
+from urllib.parse import urlsplit
+
 import requests
 
 from app.engine import clock
@@ -59,6 +61,17 @@ class Http:
 
 
 IMAGE_TYPES = ("image/jpeg", "image/png", "image/webp", "image/gif", "image/avif")
+YOUTUBE_IMAGE_HOSTS = ("googleusercontent.com", "ytimg.com", "ggpht.com")   # where YouTube Music's artwork is
+
+
+def url_allowed(url: str, hosts, schemes) -> bool:
+    """`url` has one of `schemes` and its host is one of `hosts` or below it ("host" and "*.host")."""
+    try:
+        p = urlsplit(url)
+        host = (p.hostname or "").lower()
+    except ValueError:
+        return False
+    return p.scheme in schemes and bool(host) and any(host == h or host.endswith("." + h) for h in hosts)
 
 
 def fetch_image(url: str, *, max_bytes: int, timeout=(5, 10), types=IMAGE_TYPES) -> tuple[bytes, str] | None:
