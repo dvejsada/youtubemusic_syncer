@@ -29,6 +29,7 @@ SETTING_DEFS: dict[str, tuple[str, str]] = {
     "finalize_timeout_min": ("FINALIZE_TIMEOUT_MIN", "20"),
 }
 SECRET_KEYS = ("lidarr_api_key", "jellyfin_api_key")
+WEBHOOK_TOKEN, WEBHOOK_LAST = "webhook_token", "webhook_last"  # get_meta / set_meta keys
 
 PLAYLIST_COLUMNS = {
     "ref", "url", "name", "is_mix", "jellyfin_name", "interval_hours", "enabled", "do_lidarr",
@@ -423,25 +424,29 @@ def track_stats(pid: int) -> dict:
 
 def playlists_waiting_for(artist: str, album: str) -> list[int]:
     """Playlists (with Jellyfin on) that have a track not in the Jellyfin library yet whose Lidarr release is
-    this album ("Artist - Title [Type]", both from Lidarr's metadata). Without artist / album: all of them."""
+    this album ("Artist - Title [Type]", both from Lidarr's metadata). None without artist and album."""
+    if not (artist and album):
+        return []
     prefix = f"{artist} - {album} [".casefold()
     with connect() as c:
         rows = c.execute("SELECT DISTINCT t.playlist_id, t.lidarr_release FROM tracks t"
                          " JOIN playlists p ON p.id = t.playlist_id"
-                         " WHERE p.do_jellyfin = 1 AND t.jellyfin_status = 'missing'").fetchall()
-    return sorted({r["playlist_id"] for r in rows
-                   if not (artist and album) or (r["lidarr_release"] or "").casefold().startswith(prefix)})
+                         " WHERE p.do_jellyfin = 1 AND t.jellyfin_status = 'missing'"
+                         " AND t.lidarr_release <> ''").fetchall()
+    return sorted({r["playlist_id"] for r in rows if (r["lidarr_release"] or "").casefold().startswith(prefix)})
 
 
 def schedule_jellyfin_update(pids: list[int], delay_seconds: float) -> None:
-    """A Jellyfin-only update of these playlists in `delay_seconds` (an already scheduled one is kept, so a
-    burst of imports leads to one update)."""
+    """A Jellyfin-only update of these playlists in `delay_seconds`. An update already due sooner is kept, so
+    a burst of imports leads to one update (timed from the first import); a later one (a pending retry) is
+    brought forward and counts as a fresh update with its own retry."""
     if not pids:
         return
     due = (now_dt() + timedelta(seconds=delay_seconds)).isoformat()
     with connect() as c:
         c.executemany("UPDATE playlists SET jellyfin_due_at=?, jellyfin_due_try=0"
-                      " WHERE id=? AND jellyfin_due_at IS NULL", [(due, pid) for pid in pids])
+                      " WHERE id=? AND (jellyfin_due_at IS NULL OR jellyfin_due_at > ?)",
+                      [(due, pid, due) for pid in pids])
 
 
 def next_jellyfin_due_id() -> int | None:

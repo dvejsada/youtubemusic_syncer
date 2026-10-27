@@ -42,7 +42,7 @@ def _base_url(url: str) -> str:
 
 
 class ApiError(RuntimeError):
-    """HTTP error from Lidarr / Jellyfin write calls (carries the status code)."""
+    """HTTP error answer from a service (raised by http.Http; carries the status code for _fatal)."""
 
     def __init__(self, msg, status=None):
         super().__init__(msg)
@@ -72,8 +72,6 @@ def _fatal(service: str, exc: Exception, url: str, redact) -> EngineError:
         # JSON decode error / unexpected JSON shape: answered, but not by the service we expect
         return EngineError(f"{service}: unexpected response from {_origin(url)} — is the URL right?")
     return EngineError(f"{service}: {redact(exc)}")
-
-
 
 
 _NOLOG = lambda m="": None  # noqa: E731

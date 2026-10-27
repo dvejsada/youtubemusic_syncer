@@ -169,9 +169,9 @@ class TestResolve:
     def test_lookup_errors_are_reported_not_raised(self):
         class Boom(_FakeLid):
             def lookup(self, *a):
-                raise RuntimeError("503 Server Error for url: http://x/api?term=y")
+                raise engine.ApiError("GET album/lookup -> 503 Service Unavailable", 503)
         found, how, err = resolve(Boom(), _FakeMB(), {"artists": ["A"], "album": "B", "titles": ["T"]})
-        assert found is None and err == "503 Server Error"
+        assert found is None and err == "GET album/lookup -> 503 Service Unavailable"
 
 
 class TestMusicBrainzClient:

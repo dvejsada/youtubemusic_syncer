@@ -1,6 +1,8 @@
 """Lidarr: finding the release of a track (with the MusicBrainz fallback), adding / monitoring albums."""
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+
 from app.engine import clock
 from app.engine.cache import RETRY_DAYS, Cache
 from app.engine.common import _CHECK_TIMEOUT, _NOLOG, EngineError, _base_url, _fatal, _redactor
@@ -8,7 +10,6 @@ from app.engine.http import Http
 from app.engine.matching import clean, norm, sim
 from app.engine.models import Settings, TrackResult
 from app.engine.musicbrainz import MusicBrainz
-from dataclasses import dataclass, field
 
 
 class Lidarr:
@@ -225,7 +226,7 @@ def resolve(lid, mb, a):
         try:
             return fn(*fargs)
         except Exception as e:
-            err = str(e).split(" for url")[0]
+            err = str(e)
             return None
 
     # 1. Lidarr text search: album, then the song as a single
@@ -387,8 +388,6 @@ def _sync_lidarr(lid: Lidarr, tracks: list[dict], results: list[TrackResult], dr
     return bool(should_stop()), []  # stopped: the finalize wait was interrupted
 
 
-
-
 @dataclass
 class FinalizeStep:
     busy: bool = False                                 # Lidarr is still importing: nothing was done
@@ -411,8 +410,6 @@ def lidarr_finalize_step(settings: Settings, foreign_album_ids: list[str], force
         return FinalizeStep(busy=True)
     done, missing, unmonitored = lid.monitor_and_search(list(foreign_album_ids))
     return FinalizeStep(done=done, missing=missing, unmonitored=unmonitored)
-
-
 
 
 def _lidarr_http(settings: Settings) -> Http:

@@ -2,6 +2,7 @@
 Lidarr / Jellyfin are the in-process mock servers from mock_servers.py."""
 import base64
 import html
+import json
 import os
 import re
 import tempfile
@@ -981,8 +982,10 @@ class TestLidarrWebhook:
         assert other.post(hook, content=b"not json").status_code == 400
 
     def test_settings_show_the_url_and_last_event(self, client, hook):
-        page = client.get("/settings").text
-        assert hook in html.unescape(page) and "No event received yet" in page
+        page = html.unescape(client.get("/settings").text)
+        assert "http://testserver/hooks/lidarr" in page and db.get_meta("webhook_token") in page
+        assert "?token=" + db.get_meta("webhook_token") not in page   # the password isn't put in the URL
+        assert "No event received yet" in page
         client.post(hook, json={"eventType": "Test"})
         assert "Last event: Test" in client.get("/settings").text
         old = db.get_meta("webhook_token")
@@ -1019,6 +1022,66 @@ class TestLidarrWebhook:
             assert after[k] == before[k], k
         run = db.list_runs(synced)[0]
         assert run["trigger"] == "import" and "After Lidarr import" in client.get(f"/playlists/{synced}?tab=runs").text
+
+    def test_changed_playlist_keeps_each_tracks_lidarr_result(self, client, hook, synced, monkeypatch, servers):
+        before = {t["title"]: (t["lidarr_status"], t["lidarr_release"]) for t in db.list_tracks(synced)}
+        tracks = fake_ytm(monkeypatch).playlists["PLroad"]["tracks"]
+        tracks.insert(0, yt_track("Brand New", ["Somebody"], "Fresh"))   # inserted at the top...
+        tracks.reverse()                                                 # ...and reordered
+        client.post(hook, json=DISCOVERY_IMPORTED)
+        db.update_playlist(synced, jellyfin_due_at=db.iso_in_hours(-0.01))
+        worker.run_pending_once()
+        after = {t["title"]: (t["lidarr_status"], t["lidarr_release"], t["lidarr_note"]) for t in db.list_tracks(synced)}
+        assert {k: v[:2] for k, v in after.items() if k != "Brand New"} == before
+        assert after["Brand New"] == ("pending", "", "new since the last full sync")
+        assert db.playlists_waiting_for("Daft Punk", "Discovery") == [synced]   # still found by the next import
+
+    def test_interrupted_update_writes_nothing_and_resumes(self, client, hook, synced, monkeypatch):
+        before = [(t["title"], t["jellyfin_status"], t["lidarr_status"]) for t in db.list_tracks(synced)]
+        matched = db.get_playlist(synced)["jellyfin_matched"]
+        client.post(hook, json=DISCOVERY_IMPORTED)
+        db.update_playlist(synced, jellyfin_due_at=db.iso_in_hours(-0.01))
+        real = engine.sync_playlist
+
+        def shutdown_meanwhile(*a, **kw):
+            worker._stop.set()
+            return real(*a, **kw)
+        monkeypatch.setattr(engine, "sync_playlist", shutdown_meanwhile)
+        assert worker.run_playlist(synced, "import") == "interrupted"
+        worker._stop.clear()
+        assert [(t["title"], t["jellyfin_status"], t["lidarr_status"]) for t in db.list_tracks(synced)] == before
+        pl = db.get_playlist(synced)
+        assert pl["jellyfin_matched"] == matched and db.parse_iso(pl["jellyfin_due_at"]) <= db.now_dt()
+
+    def test_failed_update_is_retried_once(self, client, hook, synced, servers):
+        before = [(t["title"], t["jellyfin_status"]) for t in db.list_tracks(synced)]
+        client.post(hook, json=DISCOVERY_IMPORTED)
+        db.update_playlist(synced, jellyfin_due_at=db.iso_in_hours(-0.01))
+        servers.jf.fail_items = True   # Jellyfin answers 500 to every search
+        worker.run_pending_once()
+        assert [(t["title"], t["jellyfin_status"]) for t in db.list_tracks(synced)] == before   # nothing clobbered
+        pl = db.get_playlist(synced)
+        assert pl["jellyfin_due_try"] == 1 and db.parse_iso(pl["jellyfin_due_at"]) > db.now_dt()
+
+    def test_skipped_when_jellyfin_was_turned_off(self, client, hook, synced):
+        client.post(hook, json=DISCOVERY_IMPORTED)
+        db.update_playlist(synced, jellyfin_due_at=db.iso_in_hours(-0.01), do_jellyfin=0)
+        runs = len(db.list_runs(synced))
+        assert worker.run_pending_once() == 1
+        assert len(db.list_runs(synced)) == runs and db.get_playlist(synced)["jellyfin_due_at"] is None
+
+    def test_new_import_brings_a_pending_retry_forward(self, client, hook, synced):
+        db.update_playlist(synced, jellyfin_due_at=db.iso_in_hours(10 / 60), jellyfin_due_try=1)
+        client.post(hook, json=DISCOVERY_IMPORTED)
+        pl = db.get_playlist(synced)
+        assert pl["jellyfin_due_try"] == 0 and (db.parse_iso(pl["jellyfin_due_at"]) - db.now_dt()).total_seconds() <= 125
+
+    def test_odd_payloads(self, client, hook, synced):
+        assert client.post(hook, content=b"[" * 100000).status_code == 400
+        no_album = {"eventType": "Download", "artist": {"name": "Daft Punk"}}
+        assert client.post(hook, json=no_album).json()["playlists"] == []   # nothing to match: nothing scheduled
+        client.post(hook, json={"eventType": "x" * 5000})
+        assert len(json.loads(db.get_meta("webhook_last"))["event"]) == 200
 
     def test_one_retry_when_jellyfin_has_not_scanned_yet(self, client, hook, synced):
         client.post(hook, json=DISCOVERY_IMPORTED)
