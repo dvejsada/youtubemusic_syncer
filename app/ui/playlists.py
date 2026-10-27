@@ -199,6 +199,7 @@ def detail_head(pl: dict, stats: dict, state):
                 Div(Small("Mix" if pl["is_mix"] else "Playlist", cls="eyebrow"),
                     H1(name_of(pl), cls="hero-title"),
                     Div(state_badge(state, pl), Span(interval_label(pl["interval_hours"])),
+                        Span("Mirrored in Jellyfin") if pl["jellyfin_mirror"] and pl["do_jellyfin"] else None,
                         Span("synced ", rel_time(pl["last_run_at"])) if pl["last_run_at"] else Span("not synced yet"),
                         A(icon("external"), Span("Open in YouTube Music"), href=pl["url"] or "#", target="_blank",
                           rel="noopener noreferrer"), cls="hero-meta"),
@@ -299,6 +300,10 @@ def run_summary_text(run: dict) -> str:
     parts = [f"{s['tracks']} tracks", f"Lidarr {s.get('lidarr_found', 0)}", f"Jellyfin {s.get('jellyfin_matched', 0)}"]
     if s.get("jellyfin_added"):
         parts.append(f"{s['jellyfin_added']} added to playlist")
+    if s.get("jellyfin_removed"):
+        parts.append(f"{s['jellyfin_removed']} removed from playlist")
+    if s.get("jellyfin_moved"):
+        parts.append(f"{s['jellyfin_moved']} re-added in order")
     if s.get("jellyfin_duplicates"):
         parts.append(f"{s['jellyfin_duplicates']} repeat an earlier song")
     if s.get("lidarr_failed"):
@@ -342,7 +347,12 @@ def playlist_settings_panel(pl: dict):
                                    switch("do_lidarr", "Download with Lidarr",
                                           "Look up albums and ask Lidarr to fetch them.", bool(pl["do_lidarr"])),
                                    switch("do_jellyfin", "Update Jellyfin playlist",
-                                          "Add matched tracks to a Jellyfin playlist.", bool(pl["do_jellyfin"])))),
+                                          "Add matched tracks to a Jellyfin playlist.", bool(pl["do_jellyfin"])),
+                                   switch("jellyfin_mirror", "Mirror in Jellyfin",
+                                          "Make the Jellyfin playlist match the YouTube one on every sync: remove "
+                                          "songs that aren't on YouTube and duplicate entries, restore the order. "
+                                          "Changes you make to this playlist in Jellyfin are undone.",
+                                          bool(pl["jellyfin_mirror"])))),
                     panel(btn("Save changes", "check", type="submit"), foot=True)),
             action=f"/playlists/{pid}/settings", method="post"),
         section("Danger zone", "Irreversible actions for this playlist.",

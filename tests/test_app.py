@@ -17,6 +17,7 @@ from starlette.testclient import TestClient
 from app import config, db, engine, main, worker
 from app.routes import auth
 from app.ui import core as ui_core
+from app.ui import playlists as ui_playlists
 from mock_servers import MockJellyfin, MockLidarr, FakeYTM, install_fake_ytm, yt_track
 
 HX = {"HX-Request": "true"}
@@ -669,7 +670,20 @@ class TestDetail:
         pl = db.get_playlist(pid)
         assert (pl["jellyfin_name"], pl["interval_hours"], pl["enabled"], pl["do_lidarr"], pl["do_jellyfin"]) == \
             ("My Mix", 6, 1, 0, 1)
+        assert pl["jellyfin_mirror"] == 0
         assert "Playlist settings saved" in client.get(f"/playlists/{pid}?tab=settings").text
+        client.post(f"/playlists/{pid}/settings", data={"do_jellyfin": "on", "jellyfin_mirror": "on"})
+        assert db.get_playlist(pid)["jellyfin_mirror"] == 1
+        assert "Mirrored in Jellyfin" in client.get(f"/playlists/{pid}").text
+
+    def test_mirror_runs_from_the_worker(self, servers, monkeypatch):
+        fake_ytm(monkeypatch)
+        servers.jf.playlists["pl-x"] = {"Id": "pl-x", "Name": "Road Trip", "items": ["j-other", "j-summer"]}
+        pid = add_pl(jellyfin_mirror=1)
+        worker.run_pending_once()
+        assert servers.jf.playlists["pl-x"]["items"] == ["j-summer"]
+        run = db.list_runs(pid)[0]
+        assert run["summary"]["jellyfin_removed"] == 1 and "1 removed from playlist" in ui_playlists.run_summary_text(run)
 
     def test_error_notice(self, client):
         pid = add_pl(queued=0, last_status="error", last_error="Lidarr: bad key")

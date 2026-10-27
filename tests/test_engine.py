@@ -563,6 +563,102 @@ class TestJellyfinMatching:
         assert "    - #2 Calvin Harris, Ellie Goulding - Outside" in lines
 
 
+class TestJellyfinMirror:
+    """Mirror mode on a playlist that already exists in Jellyfin (playlist "pl-x" named like the YouTube one)."""
+
+    @pytest.fixture(autouse=True)
+    def setup(self, env):
+        env.jf.add_item("j-extra", "Song I Added", "Someone")
+        env.jf.add_item("j-out", "Outside", "Calvin Harris", "Motion")
+        self.env = env
+
+    def given(self, items, *tracks):
+        self.env.jf.playlists["pl-x"] = {"Id": "pl-x", "Name": "Road Trip", "items": list(items)}
+        self.env.ytm.playlists["PLtest"]["tracks"] = list(tracks) or [
+            yt_track("Summer", ["Calvin Harris"], "Motion"), yt_track("Paranoid Android", ["Radiohead"], "OK Computer")]
+
+    def items(self):
+        return self.env.jf.playlists["pl-x"]["items"]
+
+    def test_removes_other_songs_and_duplicates_and_restores_the_order(self):
+        self.given(["j-extra", "j-pa", "j-summer", "j-pa"])
+        res, lines = run(self.env, do_lidarr=False, jellyfin_mirror=True)
+        assert self.items() == ["j-summer", "j-pa"]
+        assert (res.jellyfin_removed, res.jellyfin_moved, res.jellyfin_added) == (2, 2, 0)
+        assert [t.jellyfin_status for t in res.tracks] == ["in_playlist", "in_playlist"]
+        assert res.status == "ok" and res.errors == []
+        assert "    - removed 'Song I Added' (not in the YouTube playlist)" in lines
+        assert any("mirror: removed 1 song(s) not in the YouTube playlist and 1 duplicate entry" in ln
+                   for ln in lines)
+
+    def test_a_correct_start_is_kept(self):
+        self.given(["j-summer", "j-pa", "j-extra"])
+        res, _ = run(self.env, do_lidarr=False, jellyfin_mirror=True)
+        assert self.items() == ["j-summer", "j-pa"]
+        assert self.env.jf.writes == [("DELETE", "/Playlists/pl-x/Items", {"entryIds": "j-extra"})]
+        assert (res.jellyfin_removed, res.jellyfin_moved) == (1, 0)
+
+    def test_new_song_in_the_middle_is_put_in_place(self):
+        self.given(["j-summer", "j-pa"], yt_track("Summer", ["Calvin Harris"], "Motion"),
+                   yt_track("Outside", ["Calvin Harris"], "Motion"),
+                   yt_track("Paranoid Android", ["Radiohead"], "OK Computer"))
+        res, _ = run(self.env, do_lidarr=False, jellyfin_mirror=True)
+        assert self.items() == ["j-summer", "j-out", "j-pa"]
+        assert [t.jellyfin_status for t in res.tracks] == ["in_playlist", "added", "in_playlist"]
+        assert (res.jellyfin_removed, res.jellyfin_moved, res.jellyfin_added) == (0, 1, 1)
+
+    def test_kept_song_repeated_later_is_not_lost(self):
+        # Jellyfin removes every copy of a song, so the repeated song can't stay in the kept start
+        self.given(["j-summer", "j-pa", "j-summer"])
+        res, _ = run(self.env, do_lidarr=False, jellyfin_mirror=True)
+        assert self.items() == ["j-summer", "j-pa"]
+        assert res.jellyfin_removed == 1 and res.status == "ok"
+
+    def test_already_matching_playlist_is_not_touched(self):
+        self.given(["j-summer", "j-pa"])
+        res, _ = run(self.env, do_lidarr=False, jellyfin_mirror=True)
+        assert self.env.jf.writes == [] and (res.jellyfin_removed, res.jellyfin_moved) == (0, 0)
+
+    def test_off_by_default(self):
+        self.given(["j-extra", "j-pa", "j-summer", "j-pa"])
+        res, _ = run(self.env, do_lidarr=False)
+        assert self.items() == ["j-extra", "j-pa", "j-summer", "j-pa"] and res.jellyfin_removed == 0
+
+    def test_skipped_when_a_lookup_fails(self):
+        self.given(["j-summer", "j-pa", "j-extra"])
+        self.env.jf.fail_search_terms = {"paranoid android"}
+        res, lines = run(self.env, do_lidarr=False, jellyfin_mirror=True)
+        assert self.items() == ["j-summer", "j-pa", "j-extra"]
+        assert not self.env.jf.writes_to("DELETE", "/Playlists")
+        assert any("Mirror skipped this time" in ln for ln in lines)
+
+    def test_never_empties_the_playlist(self):
+        self.given(["j-summer", "j-pa"], yt_track("Where Is My Mind", ["Nobody"], "Nothing"))
+        res, lines = run(self.env, do_lidarr=False, jellyfin_mirror=True)
+        assert self.items() == ["j-summer", "j-pa"] and self.env.jf.writes == []
+        assert any("Mirror skipped: no track matched" in ln for ln in lines)
+
+    def test_dry_run_reports_without_writing(self):
+        self.given(["j-extra", "j-summer", "j-pa"])
+        res, lines = run(self.env, do_lidarr=False, jellyfin_mirror=True, dry_run=True)
+        assert self.env.jf.writes == [] and self.items() == ["j-extra", "j-summer", "j-pa"]
+        assert any("mirror: would remove 1 song(s)" in ln for ln in lines)
+        assert res.jellyfin_removed == 1
+
+    def test_changes_jellyfin_ignores_are_an_error(self, monkeypatch):
+        self.given(["j-summer", "j-pa", "j-extra"])
+        monkeypatch.setattr(engine.Jellyfin, "req", _ignore_deletes(engine.Jellyfin.req))
+        res, _ = run(self.env, do_lidarr=False, jellyfin_mirror=True)
+        assert res.status == "error"
+        assert res.errors == ["Jellyfin did not apply all mirror changes to playlist 'Road Trip'"]
+
+
+def _ignore_deletes(req):
+    def wrapped(self, method, path, **kw):
+        return {} if method == "DELETE" else req(self, method, path, **kw)
+    return wrapped
+
+
 class TestDryRun:
     def test_makes_no_write_calls(self, env):
         res, lines = run(env, dry_run=True)

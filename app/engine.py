@@ -83,6 +83,8 @@ class SyncResult:
     jellyfin_matched: int = 0        # unique songs in the Jellyfin playlist
     jellyfin_added: int = 0
     jellyfin_duplicates: int = 0     # tracks that are the same Jellyfin song as an earlier track
+    jellyfin_removed: int = 0        # mirror: entries removed from the Jellyfin playlist
+    jellyfin_moved: int = 0          # mirror: songs re-added to restore the YouTube order
     jellyfin_playlist_id: str = ""
     errors: list[str] = field(default_factory=list)
     status: str = "ok"               # ok | warning (some not found / missing) | error
@@ -797,6 +799,20 @@ def _sync_lidarr(lid: Lidarr, tracks: list[dict], results: list[TrackResult], dr
 
 # ---------------------------------------------------------------- Jellyfin
 
+@dataclass
+class PlaylistUpdate:
+    """What Jellyfin.ensure_playlist did (or, in dry-run, would do)."""
+    message: str
+    playlist_id: str
+    new: list[str]                                     # items added that weren't in the playlist before
+    lost: list[str] = field(default_factory=list)      # wanted items not in the playlist when read back
+    removed: list[str] = field(default_factory=list)   # mirror: names of songs not in the YouTube playlist
+    duplicates: int = 0                                # mirror: extra copies of a song that were removed
+    moved: int = 0                                     # mirror: songs re-added to restore the order
+    written: bool = False
+    exact: bool = True                                 # read back: the playlist holds exactly the wanted ids
+
+
 class Jellyfin:
     CONNECT_TIMEOUT = 10
 
@@ -851,47 +867,91 @@ class Jellyfin:
                 break
         return best if score >= 0.75 else None
 
-    def playlist_item_ids(self, playlist_id) -> set:
-        return {i["Id"] for i in self.req("GET", f"/Playlists/{playlist_id}/Items",
-                                          params={"userId": self.uid}).get("Items", [])}
+    def playlist_entries(self, playlist_id) -> list[dict]:
+        """The playlist in order: [{"entry", "id", "name"}]. Current Jellyfin uses the item id as entry id."""
+        items = self.req("GET", f"/Playlists/{playlist_id}/Items", params={"userId": self.uid}).get("Items", [])
+        return [{"entry": i.get("PlaylistItemId") or i["Id"], "id": i["Id"], "name": i.get("Name") or i["Id"]}
+                for i in items]
 
-    def ensure_playlist(self, name, ids):
-        """Append-only. Returns (message, playlist_id, new_ids, lost_ids): new_ids are the items that were
-        (or, in dry-run, would be) added; lost_ids were sent but are not in the playlist when it is read back."""
+    def _append(self, playlist_id, ids):
+        for k in range(0, len(ids), 50):
+            self.req("POST", f"/Playlists/{playlist_id}/Items",
+                     params={"ids": ",".join(ids[k:k + 50]), "userId": self.uid})
+
+    def ensure_playlist(self, name, ids, mirror=False) -> "PlaylistUpdate":
+        """Append-only, or with `mirror` make an existing playlist hold exactly `ids` in this order.
+        After writing, the playlist is read back: ids that are not in it end up in `lost`."""
         pls = self.req("GET", "/Items", params={
             "userId": self.uid, "includeItemTypes": "Playlist", "recursive": "true", "searchTerm": name,
         }).get("Items", [])
         pl = next((p for p in pls if p["Name"] == name), None)
         if not pl:
             if self.dry:
-                return f"would create playlist '{name}' with {len(ids)} tracks", "", list(ids), []
+                return PlaylistUpdate(f"would create playlist '{name}' with {len(ids)} tracks", "", list(ids))
             res = self.req("POST", "/Playlists", json={
                 "Name": name, "Ids": ids, "UserId": self.uid, "MediaType": "Audio",
             })
-            pl_id, new = res.get("Id") or "", list(ids)
-            msg = f"created playlist '{name}' with {len(ids)} tracks (id {res.get('Id')})"
+            upd = PlaylistUpdate(f"created playlist '{name}' with {len(ids)} tracks (id {res.get('Id')})",
+                                 res.get("Id") or "", list(ids), written=True)
         else:
-            pl_id = pl["Id"]
-            present = self.playlist_item_ids(pl_id)
-            new = [i for i in ids if i not in present]
-            if new and not self.dry:
-                for k in range(0, len(new), 50):
-                    self.req("POST", f"/Playlists/{pl_id}/Items",
-                             params={"ids": ",".join(new[k:k + 50]), "userId": self.uid})
+            before = self.playlist_entries(pl["Id"])
+            have = {e["id"] for e in before}
+            upd = PlaylistUpdate("", pl["Id"], [i for i in ids if i not in have])
             verb = "would add" if self.dry else "added"
-            msg = f"playlist '{name}' exists: {verb} {len(new)} new track(s)"
-        lost = []
-        if new and pl_id and not self.dry:
+            upd.message = f"playlist '{name}' exists: {verb} {len(upd.new)} new track(s)"
+            if mirror:
+                self._mirror(upd, before, ids)
+            elif upd.new and not self.dry:
+                self._append(upd.playlist_id, upd.new)
+                upd.written = True
+        if upd.written and upd.playlist_id:
             # Jellyfin can answer a write with success and still not keep the items: check
-            present = self.playlist_item_ids(pl_id)
-            lost = [i for i in new if i not in present]
-            new = [i for i in new if i in present]
-        return msg, pl_id, new, lost
+            after = [e["id"] for e in self.playlist_entries(upd.playlist_id)]
+            upd.lost = [i for i in ids if i not in set(after)]
+            upd.new = [i for i in upd.new if i in set(after)]
+            upd.exact = after == list(ids)
+        return upd
+
+    def _mirror(self, upd: "PlaylistUpdate", before: list[dict], ids: list[str]) -> None:
+        """Jellyfin doesn't let an API key move or replace playlist items, and removing an entry removes every
+        copy of that song. So: remove the songs that don't belong, keep the longest start that is already in
+        the right order, remove everything after it and append the rest of `ids` in order."""
+        wanted, seen = set(ids), set()
+        for e in before:
+            if e["id"] not in wanted:
+                upd.removed.append(e["name"])
+            elif e["id"] in seen:
+                upd.duplicates += 1
+            seen.add(e["id"])
+        rest = [e for e in before if e["id"] in wanted]
+        k = 0
+        while k < min(len(rest), len(ids)) and rest[k]["id"] == ids[k]:
+            k += 1
+        later = {e["id"] for e in rest[k:]}
+        # a kept song must not come again later: removing that copy would remove the kept one too
+        k = next((j for j in range(k) if rest[j]["id"] in later), k)
+        drop = list(dict.fromkeys([e["entry"] for e in before if e["id"] not in wanted]
+                                  + [e["entry"] for e in rest[k:]]))
+        add = ids[k:]
+        upd.moved = sum(i in seen for i in add)
+        if drop or add != upd.new:
+            upd.message += (f"; mirror: {'would remove' if self.dry else 'removed'} {len(upd.removed)} song(s) "
+                            f"not in the YouTube playlist and {upd.duplicates} duplicate entr"
+                            f"{'y' if upd.duplicates == 1 else 'ies'}, re-added {upd.moved} to restore the order")
+        if self.dry:
+            return
+        for j in range(0, len(drop), 50):
+            self.req("DELETE", f"/Playlists/{upd.playlist_id}/Items", params={"entryIds": ",".join(drop[j:j + 50])})
+        self._append(upd.playlist_id, add)
+        upd.written = bool(drop or add)
 
 
 def _sync_jellyfin(jf: Jellyfin, name: str, tracks: list[dict], results: list[TrackResult],
-                   log, redact, should_stop, errors: list[str]) -> str:
-    """Runs the Jellyfin phase. Returns the playlist id ('' if none)."""
+                   log, redact, should_stop, errors: list[str], mirror: bool = False,
+                   stats: dict | None = None) -> str:
+    """Runs the Jellyfin phase. Returns the playlist id ('' if none); mirror counts go into `stats`."""
+    stats = stats if stats is not None else {}
+    lookup_failed = False
     log("")
     log(f"== Jellyfin: matching {len(tracks)} tracks ==")
     ids, missing = [], []
@@ -908,6 +968,7 @@ def _sync_jellyfin(jf: Jellyfin, name: str, tracks: list[dict], results: list[Tr
             consecutive_errors = 0
         except Exception as e:
             log(f"  !  {t['title']}: {redact(e)}")
+            lookup_failed = True
             consecutive_errors += 1
             if consecutive_errors >= 5:
                 errors.append("Jellyfin: stopped after repeated errors: " + redact(e))
@@ -937,18 +998,27 @@ def _sync_jellyfin(jf: Jellyfin, name: str, tracks: list[dict], results: list[Tr
         log(f"  {len(duplicates)} track(s) are the same Jellyfin song as an earlier track (added once):")
         for tr in duplicates:
             log(f"    = #{tr.position} {', '.join(tr.artists)} - {tr.title}  ({tr.jellyfin_note})")
+    if mirror and lookup_failed:
+        mirror = False
+        log("  Mirror skipped this time: some Jellyfin lookups failed, so nothing is removed or reordered.")
+    elif mirror and not ids:
+        log("  Mirror skipped: no track matched, the Jellyfin playlist is left as it is.")
     playlist_id = ""
     if ids:
         try:
-            msg, playlist_id, new_ids, lost_ids = jf.ensure_playlist(name, ids)
-            log("  " + msg)
+            upd = jf.ensure_playlist(name, ids, mirror=mirror)
+            playlist_id = upd.playlist_id
+            log("  " + upd.message)
         except Exception as e:
             errors.append("Jellyfin playlist update failed: " + redact(e))
             log(f"  !  playlist update failed: {redact(e)}")
             for tr in [tr for tr, _ in matched] + duplicates:
                 tr.jellyfin_status = "skipped"
             return ""
-        new, lost = set(new_ids), set(lost_ids)
+        stats.update(removed=len(upd.removed) + upd.duplicates, moved=upd.moved)
+        for song in upd.removed:
+            log(f"    - removed '{song}' (not in the YouTube playlist)")
+        new, lost = set(upd.new), set(upd.lost)
         for tr, item_id in matched:
             tr.jellyfin_status = "not_added" if item_id in lost else "added" if item_id in new else "in_playlist"
         if lost:
@@ -957,6 +1027,9 @@ def _sync_jellyfin(jf: Jellyfin, name: str, tracks: list[dict], results: list[Tr
             for tr, item_id in matched:
                 if item_id in lost:
                     log(f"    - #{tr.position} {', '.join(tr.artists)} - {tr.title}")
+        elif mirror and not upd.exact and not jf.dry:
+            errors.append(f"Jellyfin did not apply all mirror changes to playlist '{name}'")
+            log("  !  the playlist still differs from the YouTube playlist after mirroring")
     if missing:
         log(f"  not in library yet ({len(missing)}) - will be appended on a later sync once Lidarr has them:")
         for t in missing:
@@ -968,9 +1041,11 @@ def _sync_jellyfin(jf: Jellyfin, name: str, tracks: list[dict], results: list[Tr
 
 def sync_playlist(settings: Settings, ref: str, *, jellyfin_name: str | None = None,
                   do_lidarr: bool = True, do_jellyfin: bool = True, dry_run: bool = False,
-                  log=print, should_stop=lambda: False) -> SyncResult:
+                  jellyfin_mirror: bool = False, log=print, should_stop=lambda: False) -> SyncResult:
     """Sync one YouTube Music playlist. Raises EngineError for fatal problems (service
-    unreachable / unauthorised, playlist unreadable); per-track problems end up in the result."""
+    unreachable / unauthorised, playlist unreadable); per-track problems end up in the result.
+    With `jellyfin_mirror` the Jellyfin playlist is made to match: other songs and duplicate entries are
+    removed and the YouTube order is restored (instead of only appending)."""
     redact = _redactor(settings)
 
     def say(msg=""):
@@ -1012,8 +1087,10 @@ def sync_playlist(settings: Settings, ref: str, *, jellyfin_name: str | None = N
         for tr in results:
             tr.lidarr_status = "skipped"
     if do_jellyfin and not stopped:
+        jf_stats: dict = {}
         res.jellyfin_playlist_id = _sync_jellyfin(jf, jellyfin_name or title, tracks, results,
-                                                  say, redact, should_stop, res.errors)
+                                                  say, redact, should_stop, res.errors, jellyfin_mirror, jf_stats)
+        res.jellyfin_removed, res.jellyfin_moved = jf_stats.get("removed", 0), jf_stats.get("moved", 0)
         stopped = stopped or should_stop()
     elif not do_jellyfin:
         for tr in results:
@@ -1160,6 +1237,8 @@ def main(argv=None) -> int:
     p.add_argument("--name", help="Jellyfin playlist name (default: same as on YouTube Music)")
     p.add_argument("--only", choices=["lidarr", "jellyfin"])
     p.add_argument("--dry-run", action="store_true", help="show what would happen, change nothing")
+    p.add_argument("--mirror", action="store_true",
+                   help="make the Jellyfin playlist match exactly: remove other songs and duplicates, restore the order")
     p.add_argument("--ytm-auth", default=base.ytm_auth_path)
     p.add_argument("--lidarr-url", default=base.lidarr_url)
     p.add_argument("--lidarr-key", default=base.lidarr_api_key)
@@ -1183,7 +1262,7 @@ def main(argv=None) -> int:
     try:
         sync_playlist(settings, args.playlist, jellyfin_name=args.name,
                       do_lidarr=args.only != "jellyfin", do_jellyfin=args.only != "lidarr",
-                      dry_run=args.dry_run, log=lambda m="": print(m, flush=True))
+                      dry_run=args.dry_run, jellyfin_mirror=args.mirror, log=lambda m="": print(m, flush=True))
     except EngineError as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
