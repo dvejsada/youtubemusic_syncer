@@ -137,6 +137,65 @@ class TestMobileCss:
         assert "T" * 300 in page and "A" * 300 in page  # rendered in ellipsis/anywhere-wrapping elements, no table
 
 
+class TestCrossSiteRequests:
+    def test_cross_site_posts_are_refused(self, client):
+        pid = add_pl(queued=0)
+        for headers in ({"Sec-Fetch-Site": "cross-site"}, {"Sec-Fetch-Site": "same-site"},
+                        {"Origin": "https://evil.example"}, {"Origin": "null"},
+                        {"Referer": "https://evil.example/page"}):
+            r = client.post(f"/playlists/{pid}/sync", headers=headers)
+            assert r.status_code == 403 and r.text == "Cross-site request blocked", headers
+        assert db.get_playlist(pid)["queued"] == 0
+
+    def test_same_origin_and_headerless_posts_pass(self, client):
+        pid = add_pl(queued=0)
+        for headers in ({"Sec-Fetch-Site": "same-origin"}, {"Origin": "http://testserver"},
+                        {"Origin": "https://music.example", "X-Forwarded-Host": "music.example"}, {}):
+            db.update_playlist(pid, queued=0)
+            assert client.post(f"/playlists/{pid}/sync", headers=headers).status_code == 200, headers
+            assert db.get_playlist(pid)["queued"] == 1
+
+    def test_login_is_protected_too_and_navigation_is_not(self, anon):
+        r = anon.post("/login", data={"password": "pw-123"}, headers={"Sec-Fetch-Site": "cross-site"})
+        assert r.status_code == 403
+        assert anon.get("/login", headers={"Sec-Fetch-Site": "cross-site"}).status_code == 200
+
+    def test_webhook_is_not_affected(self, anon):
+        r = anon.post("/hooks/lidarr", json={"eventType": "Test"}, headers={"Sec-Fetch-Site": "cross-site"})
+        assert r.status_code == 404   # off; not 403
+
+
+class TestProxySignIn:
+    @pytest.fixture(autouse=True)
+    def proxy_env(self, monkeypatch):
+        monkeypatch.setenv("AUTH_HEADER", "Remote-User")
+        monkeypatch.setenv("TRUSTED_PROXIES", "10.0.0.0/8, not-a-network")
+
+    def via(self, host):
+        return TestClient(main.app, client=(host, 40000), follow_redirects=False)
+
+    def test_trusted_proxy_with_the_header_is_signed_in(self):
+        proxy = self.via("10.1.2.3")
+        assert proxy.get("/", headers={"Remote-User": "dan"}).status_code == 200
+        assert proxy.get("/login", headers={"Remote-User": "dan"}).headers["location"] == "/"
+        assert proxy.get("/", headers={"Remote-User": " "}).status_code == 303   # empty user: not signed in
+        assert proxy.get("/").status_code == 303
+
+    def test_header_is_ignored_from_other_addresses(self):
+        direct = self.via("192.168.1.9")
+        r = direct.get("/", headers={"Remote-User": "dan"})
+        assert r.status_code == 303 and r.headers["location"] == "/login"
+
+    def test_off_without_both_settings(self, monkeypatch):
+        monkeypatch.setenv("TRUSTED_PROXIES", "")
+        assert self.via("10.1.2.3").get("/", headers={"Remote-User": "dan"}).status_code == 303
+
+    def test_login_page_without_password(self, monkeypatch):
+        monkeypatch.delenv("APP_PASSWORD")
+        page = self.via("192.168.1.9").get("/login").text
+        assert "Sign in through your reverse proxy" in page and "APP_PASSWORD is not set" not in page
+
+
 class TestAuth:
     @pytest.mark.parametrize("path", ["/", "/settings", "/playlists/1", "/ui/connections", "/ui/playlists"])
     def test_redirects_to_login(self, anon, path):

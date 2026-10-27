@@ -7,7 +7,7 @@ matching logic is the same, now with a UI, run history and a background schedule
 
 * FastHTML + htmx UI styled with Pico CSS, stdlib SQLite, one Python process, no external services or CDNs
   (htmx and Pico are vendored in `app/static`).
-* Single user, protected by one password.
+* Single user, protected by one password, or signed in by your reverse proxy (`AUTH_HEADER` + `TRUSTED_PROXIES`).
 
 ## Quick start
 
@@ -120,5 +120,16 @@ start failing. Public playlists and mixes keep syncing without the login if it e
   under "Not found in Lidarr"; add those manually.
 * Matching is heuristic. Remixes, live versions and very generic titles can occasionally pick the wrong release.
 * Deleting a playlist in the app removes only its records here, not the Jellyfin playlist or Lidarr albums.
-* There is one password and no CSRF tokens (the session cookie is `SameSite=Lax`); put the app behind your
-  LAN/VPN or a reverse proxy with HTTPS.
+* There is one password (or your reverse proxy's sign-in, see below). Cross-site requests are refused: a
+  state-changing request whose `Sec-Fetch-Site` / `Origin` says another site sent it gets 403, so another page
+  can't act with your session (the cookie is also `SameSite=Lax`). Still, put the app behind your LAN/VPN or a
+  reverse proxy with HTTPS.
+
+## Signing in through a reverse proxy
+
+If a proxy such as Authelia, Authentik or oauth2-proxy already signs you in, set `AUTH_HEADER` to the header
+it passes the user name in (e.g. `Remote-User`) and `TRUSTED_PROXIES` to the proxy's address or network
+(e.g. `172.18.0.0/16`, comma-separated). A request from such an address that carries the header is signed in;
+the header is ignored from anywhere else, so it can't be forged by reaching the app directly. With both set,
+`APP_PASSWORD` may be left empty, and then the app can only be used through the proxy. The address checked is
+the one uvicorn sees, which is the proxy's own address in the usual Docker setup.

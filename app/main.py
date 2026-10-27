@@ -12,6 +12,8 @@ from pathlib import Path
 
 from fasthtml.common import Beforeware, Link, Meta, Redirect, Script, fast_app, setup_toasts
 from starlette.responses import FileResponse, PlainTextResponse
+
+from app import security
 from starlette.staticfiles import StaticFiles
 
 from app import db, worker
@@ -50,8 +52,13 @@ def _static(name: str) -> str:
     return f"/static/{name}?v={int((STATIC / name).stat().st_mtime)}"
 
 
-def auth_before(session):
-    if not session.get("auth"):
+def csrf_before(req):
+    if security.is_cross_site(req):
+        return PlainTextResponse("Cross-site request blocked", status_code=403)
+
+
+def auth_before(req, session):
+    if not session.get("auth") and not security.proxy_user(req):
         return Redirect("/login")
 
 
@@ -77,8 +84,9 @@ app, rt = fast_app(
           Link(rel="stylesheet", href=_static("app.css")),
           Script(src="/static/htmx.min.js")),
     htmlkw=dict(lang="en"),
-    # /hooks/... authenticate with their own token (see routes/hooks.py)
-    before=Beforeware(auth_before, skip=[r"/login", r"/static/.*", r"/health", r"/favicon\.ico", r"/hooks/.*"]),
+    # /hooks/... are called by other servers and authenticate with their own token (see routes/hooks.py)
+    before=[Beforeware(csrf_before, skip=[r"/hooks/.*"]),
+            Beforeware(auth_before, skip=[r"/login", r"/static/.*", r"/health", r"/favicon\.ico", r"/hooks/.*"])],
     secret_key=_secret_key(),
     session_cookie="ps_session",
     max_age=SESSION_DAYS * 24 * 3600,

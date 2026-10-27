@@ -8,6 +8,7 @@ import time
 
 from fasthtml.common import APIRouter, FtResponse, Redirect
 
+from app import security
 from app.ui.auth import login_page
 
 ar = APIRouter()
@@ -22,17 +23,18 @@ def _password() -> str:
 
 
 @ar.get("/login")
-def login_form(session):
-    if session.get("auth"):
+def login_form(req, session):
+    if session.get("auth") or security.proxy_user(req):
         return Redirect("/")
-    return login_page(not_configured=not _password())
+    return login_page(not_configured=not _password(), proxy_only=not _password() and security.proxy_auth_configured())
 
 
 @ar.post("/login")
 async def login_submit(session, password: str = ""):
     expected = _password()
     if not expected:
-        return FtResponse(login_page(not_configured=True), status_code=503)
+        return FtResponse(login_page(not_configured=True, proxy_only=security.proxy_auth_configured()),
+                          status_code=503)
     if hmac.compare_digest(password.encode(), expected.encode()):
         session.clear()
         session["auth"] = True
