@@ -8,6 +8,7 @@ import json
 import os
 import sqlite3
 import threading
+import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -403,16 +404,30 @@ def track_stats(pid: int) -> dict:
 
 # ------------------------------------------------------------ lookup cache
 
-def load_cache() -> dict:
-    """All remembered lookups as {(kind, key): value} (see engine.Cache)."""
+def load_cache_entries(kind: str, keys: list[str]) -> dict:
+    """The remembered lookups of one kind for these keys, {key: value} (engine.Cache's loader)."""
     out = {}
     with connect() as c:
-        for r in c.execute("SELECT kind, key, value FROM lookup_cache"):
-            try:
-                out[(r["kind"], r["key"])] = json.loads(r["value"])
-            except ValueError:
-                pass
+        for k in range(0, len(keys), 500):
+            chunk = keys[k:k + 500]
+            for r in c.execute(f"SELECT key, value FROM lookup_cache WHERE kind=? AND key IN "
+                               f"({','.join('?' * len(chunk))})", (kind, *chunk)):
+                try:
+                    out[r["key"]] = json.loads(r["value"])
+                except ValueError:
+                    pass
     return out
+
+
+def prune_cache(version: int, max_age_days: float) -> int:
+    """Forget lookups of another cache version or older than max_age_days (they are looked up again when
+    needed). Returns how many were removed."""
+    cutoff = time.time() - max_age_days * 86400
+    with connect() as c:
+        cur = c.execute("DELETE FROM lookup_cache WHERE CASE WHEN json_valid(value) THEN"
+                        " json_extract(value, '$.v') IS NOT ? OR COALESCE(json_extract(value, '$.at'), 0) < ?"
+                        " ELSE 1 END", (version, cutoff))
+        return cur.rowcount
 
 
 def save_cache(entries: dict) -> None:

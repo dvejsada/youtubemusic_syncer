@@ -196,6 +196,8 @@ class MockLidarr(_Server):
             if p == "album":
                 if "artistId" in q:
                     return 200, [a for a in self.albums if a["artistId"] == int(q["artistId"])]
+                if "foreignAlbumId" in q:
+                    return 200, [a for a in self.albums if a["foreignAlbumId"] == q["foreignAlbumId"]]
                 return 200, self.albums
             if p == "album/lookup":
                 return 200, self.lookups.get(unquote(q.get("term", "")), [])

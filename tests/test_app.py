@@ -5,6 +5,8 @@ import os
 import re
 import tempfile
 import threading
+import time
+from datetime import timedelta
 
 # app.main reads DATA_DIR / SECRET_KEY at import time: point them at a throw-away dir first.
 os.environ["DATA_DIR"] = tempfile.mkdtemp(prefix="ps-test-import-")
@@ -595,7 +597,8 @@ class TestWorker:
         fake_ytm(monkeypatch)
         pid = add_pl()
         worker.run_pending_once()
-        assert {kind for kind, _ in db.load_cache()} == {"lidarr", "jellyfin"}
+        with db.connect() as c:
+            assert {r[0] for r in c.execute("SELECT kind FROM lookup_cache")} == {"lidarr", "jellyfin"}
         db.queue_playlist(pid)
         worker.run_pending_once()
         log = db.list_runs(pid)[0]["log"]
@@ -613,6 +616,72 @@ class TestWorker:
         log = db.list_runs(pid)[0]["log"]
         assert "Full re-check: looking up every track again." in log and "earlier sync" not in log
         assert db.get_playlist(pid)["full_recheck"] == 0
+
+    def test_recheck_requested_during_a_normal_run_is_kept(self, servers, monkeypatch):
+        fake_ytm(monkeypatch)
+        pid = add_pl()
+        real = engine.sync_playlist
+
+        def clicked_meanwhile(*a, **kw):
+            db.update_playlist(pid, full_recheck=1)   # the user clicks "Re-check all tracks" mid-run
+            return real(*a, **kw)
+        monkeypatch.setattr(engine, "sync_playlist", clicked_meanwhile)
+        worker.run_pending_once()
+        assert db.get_playlist(pid)["full_recheck"] == 1
+
+    def test_interrupted_recheck_is_kept(self, servers, monkeypatch):
+        fake_ytm(monkeypatch)
+        pid = add_pl(full_recheck=1)
+        real = engine.sync_playlist
+
+        def shutdown_meanwhile(*a, **kw):
+            worker._stop.set()
+            return real(*a, **kw)
+        monkeypatch.setattr(engine, "sync_playlist", shutdown_meanwhile)
+        assert worker.run_playlist(pid) == "interrupted"
+        worker._stop.clear()
+        assert db.get_playlist(pid)["full_recheck"] == 1
+
+    def test_failing_bookkeeping_still_records_the_run(self, servers, monkeypatch):
+        fake_ytm(monkeypatch)
+        monkeypatch.setattr(db, "load_cache_entries", lambda kind, keys: 1 / 0)
+        monkeypatch.setattr(db, "save_cache", lambda entries: 1 / 0)
+        monkeypatch.setattr(db, "add_lidarr_pending", lambda *a: 1 / 0)
+        pid = add_pl()
+        worker.run_pending_once()
+        run = db.list_runs(pid)[0]
+        assert run["status"] == "warning" and run["finished_at"]
+        assert worker.status()["running_playlist_id"] is None and db.get_playlist(pid)["queued"] == 0
+
+    def test_overdue_albums_do_not_force_fresh_ones(self, servers, monkeypatch):
+        pid = add_pl(queued=0)
+        run_id = db.create_run(pid, "manual")
+        art = servers.lidarr.add_library_artist("New One", "art-new", monitored=True)
+        servers.lidarr.add_library_album(art, "Old", "alb-old")
+        servers.lidarr.add_library_album(art, "Fresh", "alb-fresh")
+        url = engine.lidarr_base_url(db.engine_settings())
+        db.add_lidarr_pending(["alb-old", "alb-fresh"], url, pid, run_id)
+        with db.connect() as c:  # import wait is 1 min in these settings
+            c.execute("UPDATE lidarr_pending SET added_at=? WHERE foreign_album_id='alb-old'", (db.iso_in_hours(-1),))
+            c.execute("UPDATE lidarr_pending SET added_at=? WHERE foreign_album_id='alb-fresh'",
+                      ((db.now_dt() - timedelta(seconds=30)).isoformat(),))
+        servers.lidarr.busy_polls = 5   # Lidarr still importing
+        assert worker.finalize_pending_once() == 1
+        assert [r["foreign_album_id"] for r in db.lidarr_pending()] == ["alb-fresh"]
+        assert servers.lidarr.album_by_foreign("alb-old")["monitored"]
+        assert not servers.lidarr.album_by_foreign("alb-fresh")["monitored"]
+
+    def test_cache_prune_forgets_old_and_other_version_entries(self, monkeypatch):
+        now = time.time()
+        db.save_cache({("jellyfin", "fresh"): {"id": "a", "v": engine.CACHE_VERSION, "at": now},
+                       ("jellyfin", "old"): {"id": "b", "v": engine.CACHE_VERSION, "at": now - 400 * 86400},
+                       ("jellyfin", "other"): {"id": "c", "v": engine.CACHE_VERSION + 1, "at": now}})
+        with db.connect() as c:
+            c.execute("INSERT INTO lookup_cache(kind, key, value) VALUES ('ytm', 'broken', 'not json')")
+        monkeypatch.setattr(worker, "_last_prune", 0.0)
+        assert worker.prune_cache_if_due() == 3
+        assert list(db.load_cache_entries("jellyfin", ["fresh", "old", "other"])) == ["fresh"]
+        assert worker.prune_cache_if_due() == 0   # not again within a day
 
     def test_albums_of_new_artists_are_finished_in_the_background(self, servers, monkeypatch):
         fake_ytm(monkeypatch)

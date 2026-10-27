@@ -646,6 +646,41 @@ class TestIncrementalSync:
         res, _ = run(env, do_lidarr=False, cache=cache)
         assert res.tracks[0].jellyfin_status == "missing"
 
+    def test_jellyfin_match_is_checked_again_when_the_track_changed(self, env):
+        cache = engine.Cache()
+        run(env, do_lidarr=False, cache=cache)
+        env.ytm.playlists["PLtest"]["tracks"][0] = yt_track("Summer", ["Calvin Harris"], "18 Months")
+        env.jf.requests.clear()
+        res, _ = run(env, do_lidarr=False, cache=cache)
+        assert "Summer" in " ".join(_jf_searches(env))   # album changed: searched, not reused
+        assert res.tracks[0].jellyfin_status == "in_playlist"
+
+    def test_jellyfin_match_is_checked_again_after_a_week_and_kept_if_nothing_better(self, env, monkeypatch):
+        clock = {"t": 1_000_000.0}
+        monkeypatch.setattr(engine, "_now", lambda: clock["t"])
+        cache = engine.Cache()
+        run(env, do_lidarr=False, cache=cache)
+        env.jf.requests.clear()
+        clock["t"] += 8 * 86400
+        env.jf.items[0]["Name"] = "Sumer"   # renamed in Jellyfin: the search no longer finds it
+        res, _ = run(env, do_lidarr=False, cache=cache)
+        assert "Summer" in " ".join(_jf_searches(env))     # older than a week: searched again
+        assert res.tracks[0].jellyfin_item_id == "j-summer" and res.tracks[0].jellyfin_status == "in_playlist"
+
+    def test_cache_loads_only_the_entries_a_sync_needs(self, env):
+        cache = engine.Cache()
+        run(env, cache=cache)
+        stored = dict(cache.data)
+        calls = []
+
+        def loader(kind, keys):
+            calls.append((kind, list(keys)))
+            return {k: v for (kd, k), v in stored.items() if kd == kind and k in keys}
+        res, lines = run(env, cache=engine.Cache(loader=loader))
+        assert [kind for kind, _ in calls] == ["lidarr", "jellyfin"]   # one batch per phase
+        assert len(calls[1][1]) == 7 and "  matched 2/7 (2 remembered from earlier syncs)" in lines
+        assert engine.Cache(loader=lambda k, keys: 1 / 0).prefetch("ytm", ["a"]) is None  # a broken store is ignored
+
     def test_entries_of_another_version_are_ignored(self):
         cache = engine.Cache({("jellyfin", "k"): {"id": "x", "v": engine.CACHE_VERSION - 1}})
         assert cache.get("jellyfin", "k") is None
@@ -689,6 +724,13 @@ class TestDeferredLidarrFinalize:
         assert env.lidarr.album_by_foreign("alb-motion")["monitored"]
         assert set(env.lidarr.searched_album_ids()) == {env.lidarr.album_by_foreign(f)["id"]
                                                         for f in ("alb-lev", "alb-motion")}
+
+    def test_step_asks_lidarr_only_for_the_pending_albums(self, env):
+        res, _ = run(env, do_jellyfin=False, wait_for_lidarr=False)
+        env.lidarr.requests.clear()
+        engine.lidarr_finalize_step(env.settings, res.lidarr_pending)
+        album_gets = [p for m, p in env.lidarr.requests if m == "GET" and "/api/v1/album" in p]
+        assert sorted(album_gets) == ["/api/v1/album?foreignAlbumId=alb-lev", "/api/v1/album?foreignAlbumId=alb-motion"]
 
     def test_forced_step_ignores_a_busy_lidarr(self, env):
         res, _ = run(env, do_jellyfin=False, wait_for_lidarr=False)
