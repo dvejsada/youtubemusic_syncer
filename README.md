@@ -101,7 +101,7 @@ cached in `data/art`, so the browser never loads anything from external hosts.
   import, the playlists that are waiting for it get a Jellyfin-only update two minutes after the first import
   of a burst (one more try ten minutes later if that update found nothing new, e.g. Jellyfin hadn't scanned the
   files yet), instead of waiting for the next scheduled sync. The password may also be sent as `?token=` in
-  the URL, but then it shows up in access logs. *New URL* replaces the password.
+  the URL, but then it shows up in access logs. *New password* replaces it.
 
 ## Private playlists
 

@@ -74,10 +74,10 @@ def _handle_event(event: str, artist: str, album: str) -> list[int]:
 
 @ar.post("/settings/webhook")
 def webhook_on(session):
-    """Turn the webhook on, or give it a new token (the old URL stops working)."""
+    """Turn the webhook on, or give it a new password (the old one stops working)."""
     renew = bool(db.get_meta(TOKEN_KEY))
     db.set_meta(TOKEN_KEY, secrets.token_urlsafe(24))
-    add_toast(session, "New webhook URL created: update it in Lidarr" if renew else "Lidarr webhook turned on",
+    add_toast(session, "New webhook password created: update it in Lidarr" if renew else "Lidarr webhook turned on",
               "success")
     return Redirect("/settings#webhook")
 
