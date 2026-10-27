@@ -7,6 +7,7 @@ Jellyfin are in-process HTTP mocks on 127.0.0.1 (see mock_servers.py, conftest.p
 import ast
 import json
 import os
+import pathlib
 import re
 
 import pytest
@@ -168,9 +169,9 @@ class TestResolve:
     def test_lookup_errors_are_reported_not_raised(self):
         class Boom(_FakeLid):
             def lookup(self, *a):
-                raise RuntimeError("503 Server Error for url: http://x/api?term=y")
+                raise engine.ApiError("GET album/lookup -> 503 Service Unavailable", 503)
         found, how, err = resolve(Boom(), _FakeMB(), {"artists": ["A"], "album": "B", "titles": ["T"]})
-        assert found is None and err == "503 Server Error"
+        assert found is None and err == "GET album/lookup -> 503 Service Unavailable"
 
 
 class TestMusicBrainzClient:
@@ -236,7 +237,7 @@ class TestReadPlaylist:
             if settings.ytm_auth_path:
                 raise RuntimeError("authorization header expired")
             return anon
-        monkeypatch.setattr(engine, "_make_ytm", make)
+        monkeypatch.setattr(engine.ytm, "_make_ytm", make)
         lines = []
         name, _, tracks = read_playlist(Settings(ytm_auth_path="/data/browser.json"), "PL1", log=lines.append)
         assert name == "Mine" and len(tracks) == 1
@@ -250,7 +251,7 @@ class TestReadPlaylist:
         def make(settings):
             made.append(settings.ytm_auth_path)
             return FakeYTM({"PLp": RuntimeError("Server returned HTTP 403: Forbidden")})
-        monkeypatch.setattr(engine, "_make_ytm", make)
+        monkeypatch.setattr(engine.ytm, "_make_ytm", make)
         with pytest.raises(EngineError):
             read_playlist(Settings(), "PLp")
         assert made == [""]
@@ -618,7 +619,7 @@ class TestIncrementalSync:
 
     def test_not_found_is_looked_up_again_after_a_week(self, env, monkeypatch):
         clock = {"t": 1_000_000.0}
-        monkeypatch.setattr(engine, "_now", lambda: clock["t"])
+        monkeypatch.setattr(engine.clock, "now", lambda: clock["t"])
         cache = engine.Cache()
         run(env, do_jellyfin=False, cache=cache)
         env.lidarr.requests.clear()
@@ -657,7 +658,7 @@ class TestIncrementalSync:
 
     def test_jellyfin_match_is_checked_again_after_a_week_and_kept_if_nothing_better(self, env, monkeypatch):
         clock = {"t": 1_000_000.0}
-        monkeypatch.setattr(engine, "_now", lambda: clock["t"])
+        monkeypatch.setattr(engine.clock, "now", lambda: clock["t"])
         cache = engine.Cache()
         run(env, do_lidarr=False, cache=cache)
         env.jf.requests.clear()
@@ -889,8 +890,8 @@ class TestStopAndTimeouts:
     def test_finalize_gives_up_waiting_after_timeout_then_still_monitors(self, env, monkeypatch):
         env.lidarr.busy_polls = 10 ** 6
         clock = {"t": 1000.0}
-        monkeypatch.setattr(engine, "_now", lambda: clock["t"])
-        monkeypatch.setattr(engine, "_sleep", lambda s: clock.__setitem__("t", clock["t"] + s))
+        monkeypatch.setattr(engine.clock, "now", lambda: clock["t"])
+        monkeypatch.setattr(engine.clock, "sleep", lambda s: clock.__setitem__("t", clock["t"] + s))
         res, lines = run(env, do_jellyfin=False)
         polls = [ln for ln in lines if "refresh task(s) still running" in ln]
         assert 1 <= len(polls) <= 5            # 1 minute timeout / 15 s poll interval
@@ -898,15 +899,19 @@ class TestStopAndTimeouts:
         assert res.stopped is False
 
     def test_all_http_calls_have_timeouts(self):
-        tree = ast.parse(open(engine.__file__, encoding="utf-8").read())
         offenders = []
-        for node in ast.walk(tree):
-            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                    and node.func.attr in ("get", "post", "put", "request", "delete")):
-                recv = ast.unparse(node.func.value)
-                if recv in ("s", "self.s", "r.s") and not any(k.arg == "timeout" for k in node.keywords):
-                    offenders.append(node.lineno)
+        for path in sorted(pathlib.Path(engine.__file__).parent.glob("*.py")):
+            offenders += [f"{path.name}:{n}" for n in _calls_without_timeout(ast.parse(path.read_text(encoding="utf-8")))]
         assert offenders == []
+
+
+def _calls_without_timeout(tree) -> list[int]:
+    """Lines of requests-style calls (on a session named s / self.s / r.s) without a timeout."""
+    return [node.lineno for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and node.func.attr in ("get", "post", "put", "request", "delete")
+            and ast.unparse(node.func.value) in ("s", "self.s", "r.s")
+            and not any(k.arg == "timeout" for k in node.keywords)]
 
 
 # ================================================================ fatal errors

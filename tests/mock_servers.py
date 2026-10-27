@@ -455,7 +455,7 @@ class FakeYTM:
 
 def install_fake_ytm(monkeypatch, fake):
     from app import engine
-    monkeypatch.setattr(engine, "_make_ytm", lambda settings: fake)
+    monkeypatch.setattr(engine.ytm, "_make_ytm", lambda settings: fake)
     return fake
 
 

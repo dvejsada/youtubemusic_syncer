@@ -24,11 +24,11 @@ def _offline_and_fast(monkeypatch):
         return _real_connect(self, address)
 
     monkeypatch.setattr(socket.socket, "connect", guarded_connect)
-    monkeypatch.setattr(engine, "_sleep", lambda s: None)
+    monkeypatch.setattr(engine.clock, "sleep", lambda s: None)
 
     def no_ytm(settings):
         raise AssertionError("YouTube Music reached without install_fake_ytm()")
-    monkeypatch.setattr(engine, "_make_ytm", no_ytm)
+    monkeypatch.setattr(engine.ytm, "_make_ytm", no_ytm)
     # MusicBrainz answers "nothing" unless a test installs a FakeMusicBrainz
     monkeypatch.setattr(engine.MusicBrainz, "_search", lambda self, entity, query: {})
-    monkeypatch.setattr(engine, "_MB_LAST", 0.0)
+    monkeypatch.setattr(engine.musicbrainz, "_MB_LAST", 0.0)

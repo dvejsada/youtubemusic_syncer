@@ -42,7 +42,10 @@ app/
                  one module per area for the page-specific parts
   db.py          SQLite persistence
   worker.py      background scheduler thread
-  engine.py      the sync itself (YouTube Music -> Lidarr / Jellyfin), no web or database code
+  engine/        the sync itself (YouTube Music -> Lidarr / Jellyfin), no web or database code:
+                 one module per service (ytm, musicbrainz, lidarr, jellyfin), sync.py ties them together,
+                 matching.py (normalisation / similarity), cache.py (remembered lookups), http.py (the
+                 shared API client: timeouts, retries, ApiError), cli.py; app.engine re-exports the API
   static/        htmx, Pico CSS, app.css (only what Pico lacks), favicon
 ```
 
