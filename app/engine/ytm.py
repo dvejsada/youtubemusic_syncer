@@ -22,8 +22,6 @@ def parse_playlist_ref(url_or_id: str) -> str:
     return ref
 
 
-
-
 def _make_ytm(settings: Settings):
     """Factory for the YouTube Music client (tests replace this with a stub)."""
     return YTMusic(settings.ytm_auth_path) if settings.ytm_auth_path else YTMusic()
@@ -162,9 +160,6 @@ def read_playlist_full(settings: Settings, ref: str, log=None,
         tracks.append({"title": title_clean or title, "artists": artists, "album": album, "thumb": thumb,
                        "video_id": video_id})
     return pl_title, is_mix, tracks, cover
-
-
-
 
 
 _COVERS: dict[str, str] = {}  # playlist id -> cover URL seen by the last successful check_ytm

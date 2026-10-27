@@ -33,7 +33,8 @@ class Jellyfin:
 
     def __init__(self, url, key, user, dry=False, log=_NOLOG):
         self.url = _base_url(url)
-        self.http = Http(self.url, _auth_header(key), timeout=(self.CONNECT_TIMEOUT, 60))
+        # only "busy" answers are retried: a 500 for one search is usually that search, not a busy server
+        self.http = Http(self.url, _auth_header(key), timeout=(self.CONNECT_TIMEOUT, 60), retry_on=(429, 502, 503, 504))
         self.dry = dry
         users = self.req("GET", "/Users")
         match = [u for u in users if not user or u["Name"].lower() == user.lower()]
@@ -300,8 +301,6 @@ def _sync_jellyfin(jf: Jellyfin, name: str, tracks: list[dict], results: list[Tr
         for t in missing:
             log(f"    - {', '.join(t['artists'])} - {t['title']}" + (f"  [{t['album']}]" if t['album'] else ""))
     return playlist_id, stats
-
-
 
 
 def check_jellyfin(settings: Settings) -> tuple[bool, str]:
