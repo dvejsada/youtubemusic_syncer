@@ -6,8 +6,12 @@ from fasthtml.common import Article, Form, H1, Header, Input, Main, P, Small, Sp
 from app.ui.core import APP_NAME, btn, field, icon, notice
 
 
-def login_page(error: str | None = None, not_configured: bool = False):
-    if not_configured:
+def login_page(error: str | None = None, not_configured: bool = False, proxy_only: bool = False):
+    if proxy_only:
+        body = notice("info", Strong("Sign in through your reverse proxy"),
+                      P("This app is set up to be opened through the proxy that signs you in (AUTH_HEADER, "
+                        "TRUSTED_PROXIES). Open it through that address, or set APP_PASSWORD."))
+    elif not_configured:
         body = notice("warn", Strong("APP_PASSWORD is not set"),
                       P("Set APP_PASSWORD in the container environment and restart."))
     else:
