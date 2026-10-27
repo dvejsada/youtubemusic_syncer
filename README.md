@@ -132,8 +132,9 @@ start failing. Public playlists and mixes keep syncing without the login if it e
 If a proxy such as Authelia, Authentik or oauth2-proxy already signs you in, set `AUTH_HEADER` to the header
 it passes the user name in (e.g. `Remote-User`) and `TRUSTED_PROXIES` to the proxy's address (e.g.
 `172.18.0.5`; several comma-separated, networks like `10.0.0.0/24` work too). A request from such an address
-that carries the header is signed in; the header is ignored from anywhere else, so it can't be forged by
-reaching the app directly. With both set, `APP_PASSWORD` may be left empty, and then the app can only be used
+that carries the header is signed in, and the header is ignored from anywhere else. That holds only while the
+address the app sees is the connection's real peer (see the last point below): then the header can't be forged
+by reaching the app directly. With both set, `APP_PASSWORD` may be left empty, and then the app can only be used
 through the proxy.
 
 Get this right, because whoever can send that header from a trusted address is signed in:
@@ -143,6 +144,10 @@ Get this right, because whoever can send that header from a trusted address is s
   the proxy a fixed address, or don't publish port 5001 and let only the proxy reach the app.
 * The proxy must set the header itself on every request and remove one sent by the browser (including on paths
   it lets through without sign-in), and should only let in the users you want.
-* The address checked is the connection's real peer. The Docker image runs uvicorn with `--no-proxy-headers`
-  for that; don't set `FORWARDED_ALLOW_IPS` (proxy sign-in turns itself off if it is set). Run without Docker
-  with `--no-proxy-headers` too.
+* The address checked must be the connection's real peer. The Docker image runs uvicorn with
+  `--no-proxy-headers` for that. Anything that makes uvicorn take the client address from `X-Forwarded-For`
+  lets anyone who can reach the app claim to be the proxy: `--proxy-headers` with `--forwarded-allow-ips`, the
+  `FORWARDED_ALLOW_IPS` variable (proxy sign-in turns itself off if that one is set), or uvicorn's default
+  without `--no-proxy-headers` for connections from 127.0.0.1. So keep `--no-proxy-headers` if you override the
+  command (compose `command:`), run the app without Docker, or start it through another launcher (e.g.
+  gunicorn's uvicorn worker), whose own settings the app can't see.
