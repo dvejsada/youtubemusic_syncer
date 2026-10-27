@@ -34,7 +34,7 @@ PLAYLIST_COLUMNS = {
     "ref", "url", "name", "is_mix", "jellyfin_name", "interval_hours", "enabled", "do_lidarr",
     "do_jellyfin", "queued", "last_run_at", "next_run_at", "last_status", "last_error",
     "track_count", "lidarr_found", "jellyfin_matched", "jellyfin_playlist_id", "cover_url",
-    "jellyfin_duplicates", "jellyfin_mirror", "full_recheck",
+    "jellyfin_duplicates", "jellyfin_mirror", "full_recheck", "jellyfin_due_at", "jellyfin_due_try",
 }
 
 SCHEMA_V1 = """
@@ -119,7 +119,12 @@ CREATE TABLE IF NOT EXISTS lidarr_pending (
 );
 """
 
-MIGRATIONS = [SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5]  # index + 1 == user_version after applying
+SCHEMA_V6 = """
+ALTER TABLE playlists ADD COLUMN jellyfin_due_at TEXT;
+ALTER TABLE playlists ADD COLUMN jellyfin_due_try INTEGER NOT NULL DEFAULT 0;
+"""
+
+MIGRATIONS = [SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6]  # index + 1 == user_version after applying
 
 _init_lock = threading.Lock()
 
@@ -234,6 +239,18 @@ def set_settings(values: dict[str, str]) -> None:
             if k in SETTING_DEFS:
                 c.execute("INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)", (k, str(v).strip()))
         c.execute("COMMIT")
+
+
+def get_meta(key: str) -> str:
+    """App state kept in the settings table that is not a user setting (e.g. the webhook token)."""
+    with connect() as c:
+        r = c.execute("SELECT value FROM settings WHERE key=?", (f"meta:{key}",)).fetchone()
+    return (r["value"] if r else "") or ""
+
+
+def set_meta(key: str, value: str) -> None:
+    with connect() as c:
+        c.execute("INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)", (f"meta:{key}", value))
 
 
 def ytm_auth_file() -> Path:
@@ -400,6 +417,38 @@ def track_stats(pid: int) -> dict:
             " SUM(jellyfin_status='duplicate') AS jf_dup"
             " FROM tracks WHERE playlist_id=?", (pid,)).fetchone()
     return {k: (r[k] or 0) for k in r.keys()}
+
+
+# ------------------------------------------------- Jellyfin after a Lidarr import
+
+def playlists_waiting_for(artist: str, album: str) -> list[int]:
+    """Playlists (with Jellyfin on) that have a track not in the Jellyfin library yet whose Lidarr release is
+    this album ("Artist - Title [Type]", both from Lidarr's metadata). Without artist / album: all of them."""
+    prefix = f"{artist} - {album} [".casefold()
+    with connect() as c:
+        rows = c.execute("SELECT DISTINCT t.playlist_id, t.lidarr_release FROM tracks t"
+                         " JOIN playlists p ON p.id = t.playlist_id"
+                         " WHERE p.do_jellyfin = 1 AND t.jellyfin_status = 'missing'").fetchall()
+    return sorted({r["playlist_id"] for r in rows
+                   if not (artist and album) or (r["lidarr_release"] or "").casefold().startswith(prefix)})
+
+
+def schedule_jellyfin_update(pids: list[int], delay_seconds: float) -> None:
+    """A Jellyfin-only update of these playlists in `delay_seconds` (an already scheduled one is kept, so a
+    burst of imports leads to one update)."""
+    if not pids:
+        return
+    due = (now_dt() + timedelta(seconds=delay_seconds)).isoformat()
+    with connect() as c:
+        c.executemany("UPDATE playlists SET jellyfin_due_at=?, jellyfin_due_try=0"
+                      " WHERE id=? AND jellyfin_due_at IS NULL", [(due, pid) for pid in pids])
+
+
+def next_jellyfin_due_id() -> int | None:
+    with connect() as c:
+        r = c.execute("SELECT id FROM playlists WHERE jellyfin_due_at IS NOT NULL AND jellyfin_due_at<=?"
+                      " ORDER BY jellyfin_due_at, id LIMIT 1", (now_iso(),)).fetchone()
+        return r["id"] if r else None
 
 
 # ------------------------------------------------------------ lookup cache

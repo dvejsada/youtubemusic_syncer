@@ -4,7 +4,7 @@ from __future__ import annotations
 from fasthtml.common import (Code, Details, Div, Form, Input, Li, Ol, Option, Select, Small, Span, Strong, Summary,
                              Textarea)
 
-from app.ui.core import badge, btn, field, icon, interval_select, page_header, panel, section
+from app.ui.core import badge, btn, field, icon, interval_select, page_header, panel, rel_text, section
 
 
 def secret_input(name: str, saved: bool, id_: str):
@@ -110,10 +110,40 @@ def ytm_section(configured: bool):
         id="ytm")
 
 
-def settings_page_body(s: dict, ytm_configured: bool):
+def webhook_section(url: str, last: dict | None):
+    """Lidarr webhook: off (a button to turn it on) or the URL to paste into Lidarr and the last event."""
+    desc = ("Lidarr tells Playlist Sync when it has imported an album, so the Jellyfin playlist gets the new "
+            "tracks a couple of minutes later instead of at the next scheduled sync.")
+    if not url:
+        return section("Lidarr webhook", desc,
+                       panel(Div("Off.", cls="muted")),
+                       panel(Form(btn("Turn on", "plus", "outline", small=True, type="submit"),
+                                  action="/settings/webhook", method="post"), foot=True),
+                       id="webhook")
+    if last and last.get("event"):
+        seen = f"Last event: {last['event']} {rel_text(last.get('at'))}"
+        if last.get("album"):
+            seen += f" ({last['album']}, {last.get('playlists', 0)} playlist(s) to update)"
+    else:
+        seen = "No event received yet: use Test in Lidarr."
+    return section(
+        "Lidarr webhook", desc,
+        panel(field("Webhook URL", Input(type="text", id="f-hook", value=url, readonly=True, spellcheck="false"),
+                    "In Lidarr: Settings, Connect, +, Webhook. Tick On Release Import, method POST, paste this "
+                    "URL (use an address Lidarr can reach). Keep it secret: the token in it is the password.",
+                    fr="f-hook"),
+              Small(seen, cls="muted")),
+        panel(Div(Form(btn("New URL", "refresh", "ghost", small=True, type="submit"),
+                       action="/settings/webhook", method="post"),
+                  Form(btn("Turn off", "trash", "ghost", small=True, type="submit"),
+                       action="/settings/webhook/remove", method="post"), cls="row"), foot=True),
+        id="webhook")
+
+
+def settings_page_body(s: dict, ytm_configured: bool, hook_url: str = "", hook_last: dict | None = None):
     return (page_header("Settings", "Connections, sync defaults and your YouTube Music login."),
             Div(Form(lidarr_section(s), jellyfin_section(s), syncing_section(s),
                      Div(Small("Applies to Lidarr, Jellyfin and syncing.", cls="muted"),
                          btn("Save settings", "check", type="submit"), cls="save-bar"),
                      action="/settings", method="post", id="settings-form"),
-                ytm_section(ytm_configured), cls="sections"))
+                webhook_section(hook_url, hook_last), ytm_section(ytm_configured), cls="sections"))

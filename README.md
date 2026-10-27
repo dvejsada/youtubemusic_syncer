@@ -96,6 +96,11 @@ cached in `data/art`, so the browser never loads anything from external hosts.
   Lidarr, Settings, Connect, Jellyfin/Emby to trigger library updates.
 * The Jellyfin API key is created in Jellyfin under Dashboard, API Keys; the Lidarr key under
   Settings, General, Security.
+* **Lidarr webhook** (optional, Settings, Lidarr webhook, Turn on): paste the shown URL into Lidarr, Settings,
+  Connect, +, Webhook, tick *On Release Import*, method POST. After an album import, the playlists that are
+  waiting for it get a Jellyfin-only update two minutes later (one more try ten minutes after that if Jellyfin
+  hadn't scanned the files yet), instead of waiting for the next scheduled sync. The token in the URL is the
+  password: it can also go in the webhook's Password field instead. *New URL* replaces it.
 
 ## Private playlists
 

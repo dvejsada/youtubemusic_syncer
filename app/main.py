@@ -77,7 +77,8 @@ app, rt = fast_app(
           Link(rel="stylesheet", href=_static("app.css")),
           Script(src="/static/htmx.min.js")),
     htmlkw=dict(lang="en"),
-    before=Beforeware(auth_before, skip=[r"/login", r"/static/.*", r"/health", r"/favicon\.ico"]),
+    # /hooks/... authenticate with their own token (see routes/hooks.py)
+    before=Beforeware(auth_before, skip=[r"/login", r"/static/.*", r"/health", r"/favicon\.ico", r"/hooks/.*"]),
     secret_key=_secret_key(),
     session_cookie="ps_session",
     max_age=SESSION_DAYS * 24 * 3600,
