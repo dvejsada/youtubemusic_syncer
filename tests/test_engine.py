@@ -1181,6 +1181,20 @@ class TestCli:
         assert engine.main(["PLtest", "--only", "jellyfin", "--name", "CLI List"]) == 0
         assert env.jf.playlist_by_name("CLI List")["items"] == ["j-summer", "j-pa"]
 
+    def test_cli_sets_the_cover_only_when_asked(self, env, monkeypatch, capsys):
+        from mock_servers import MockImages
+        images = MockImages().start()
+        try:
+            monkeypatch.setattr(engine.jellyfin, "COVER_HOSTS", (images.host,))
+            monkeypatch.setattr(engine.jellyfin, "COVER_SCHEMES", ("http",))
+            env.ytm.playlists["PLtest"]["thumbnails"] = images.thumbs("cover-a")
+            args = ["PLtest", "--only", "jellyfin", "--jellyfin-url", env.jf.url, "--jellyfin-key", JK]
+            assert engine.main(args) == 0 and env.jf.images == {}   # the CLI keeps no record: off by default
+            assert engine.main(args + ["--cover"]) == 0
+            assert env.jf.images[env.jf.playlist_by_name("Road Trip")["Id"]][0] == "image/png"
+        finally:
+            images.stop()
+
     def test_cli_fatal_error_exit_code(self, env, monkeypatch, capsys):
         for k in ("LIDARR_URL", "LIDARR_API_KEY", "JELLYFIN_URL", "JELLYFIN_API_KEY"):
             monkeypatch.delenv(k, raising=False)
