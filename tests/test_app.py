@@ -203,9 +203,13 @@ class TestAuth:
         assert r.status_code == 503
         assert anon.get("/").status_code == 303
 
-    def test_health_is_open(self, anon):
+    def test_health_is_open_and_reports_the_worker(self, anon):
+        worker.start()
         r = anon.get("/health")
         assert r.status_code == 200 and r.text == "ok"
+        worker.stop()
+        r = anon.get("/health")
+        assert r.status_code == 503 and r.text == "sync worker is not running"
 
     def test_static_open_and_no_traversal(self, anon):
         assert anon.get("/static/app.css").status_code == 200
@@ -587,6 +591,22 @@ class TestWorker:
             assert [t.name for t in threading.enumerate()].count("sync-worker") == 1
         assert "sync-worker" not in [t.name for t in threading.enumerate()]
 
+    @pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
+    def test_dead_worker_shuts_the_app_down(self, monkeypatch):
+        died = threading.Event()
+        monkeypatch.setattr(worker, "_exit_process", died.set)
+        monkeypatch.setattr(worker, "run_pending_once", lambda: (_ for _ in ()).throw(SystemExit))
+        worker.start()
+        worker._thread.join(5)
+        assert died.is_set() and not worker.is_alive()
+
+    def test_normal_stop_does_not_shut_the_app_down(self, monkeypatch):
+        died = threading.Event()
+        monkeypatch.setattr(worker, "_exit_process", died.set)
+        worker.start()
+        worker.stop()
+        assert not worker.is_alive() and not died.is_set()
+
     def test_wake_runs_queued_playlist(self, servers, monkeypatch):
         fake_ytm(monkeypatch)
         monkeypatch.setattr(worker, "POLL_SECONDS", 60)
@@ -675,6 +695,23 @@ class TestDetail:
         client.post(f"/playlists/{pid}/settings", data={"do_jellyfin": "on", "jellyfin_mirror": "on"})
         assert db.get_playlist(pid)["jellyfin_mirror"] == 1
         assert "Mirrored in Jellyfin" in client.get(f"/playlists/{pid}").text
+
+    def test_saved_jellyfin_playlist_survives_a_rename(self, servers, monkeypatch):
+        fake_ytm(monkeypatch)
+        pid = add_pl()
+        worker.run_pending_once()
+        pl_id = db.get_playlist(pid)["jellyfin_playlist_id"]
+        servers.jf.playlists[pl_id]["Name"] = "Renamed in Jellyfin"
+        db.queue_playlist(pid)
+        worker.run_pending_once()
+        assert list(servers.jf.playlists) == [pl_id] and db.get_playlist(pid)["jellyfin_playlist_id"] == pl_id
+
+    def test_new_jellyfin_name_forgets_the_saved_playlist(self, client):
+        pid = add_pl(queued=0, jellyfin_playlist_id="pl-old", jellyfin_name="Old")
+        client.post(f"/playlists/{pid}/settings", data={"jellyfin_name": "Old", "do_jellyfin": "on"})
+        assert db.get_playlist(pid)["jellyfin_playlist_id"] == "pl-old"
+        client.post(f"/playlists/{pid}/settings", data={"jellyfin_name": "New", "do_jellyfin": "on"})
+        assert db.get_playlist(pid)["jellyfin_playlist_id"] == ""
 
     def test_mirror_runs_from_the_worker(self, servers, monkeypatch):
         fake_ytm(monkeypatch)

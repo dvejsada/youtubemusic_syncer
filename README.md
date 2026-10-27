@@ -26,7 +26,7 @@ start; afterwards the values saved in the UI are used. Data (database, login sec
 login, cached playlist/track artwork) lives in `./data`, mounted at `/data`. The container starts as root only to fix the ownership of
 `/data` and then runs the app as an unprivileged user.
 
-Without Docker: `pip install -r requirements.txt`, then
+Without Docker (Python 3.13): `pip install -r requirements.txt`, then
 `APP_PASSWORD=... uvicorn app.main:app --port 5001` (keep a single worker: the sync thread must exist once).
 Tests: `pip install -r requirements-dev.txt && python -m pytest -q`.
 The old CLI still works: `python -m app.engine "<playlist url>" --dry-run` (settings from env vars).

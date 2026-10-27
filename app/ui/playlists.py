@@ -338,7 +338,9 @@ def playlist_settings_panel(pl: dict):
                                     Input(type="text", id="jf-name", name="jellyfin_name",
                                           value=pl["jellyfin_name"] or "",
                                           placeholder=pl["name"] or "Same as on YouTube Music"),
-                                    "Leave empty to use the YouTube Music name.", fr="jf-name"),
+                                    "Leave empty to use the YouTube Music name. Changing it here starts a "
+                                    "playlist with the new name; renaming it in Jellyfin keeps it in sync.",
+                                    fr="jf-name"),
                               field("Sync interval", interval_select(pl["interval_hours"], id="interval"),
                                     fr="interval"), cls="fields"))),
             section("Automation", "Choose what happens on every sync.",
