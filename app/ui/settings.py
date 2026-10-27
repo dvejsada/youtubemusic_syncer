@@ -4,7 +4,8 @@ from __future__ import annotations
 from fasthtml.common import (Code, Details, Div, Form, Input, Li, Ol, Option, Select, Small, Span, Strong, Summary,
                              Textarea)
 
-from app.ui.core import badge, btn, field, icon, interval_select, page_header, panel, rel_text, section
+from app.config import flag
+from app.ui.core import badge, btn, field, icon, interval_select, page_header, panel, rel_text, section, switch
 
 
 def secret_input(name: str, saved: bool, id_: str):
@@ -49,6 +50,12 @@ def lidarr_section(s: dict):
                                      placeholder="http://192.168.1.10:8686"), fr="f-lurl"),
                   field("API key", secret_input("lidarr_api_key", bool(s["lidarr_api_key"]), "f-lkey"),
                         "Lidarr, Settings, General, Security.", fr="f-lkey"), cls="fields"),
+              field("Address in your browser (optional)",
+                    Input(type="url", id="f-llink", name="lidarr_link_url", value=s["lidarr_link_url"],
+                          placeholder="Same as URL"),
+                    "For the Search in Lidarr links of tracks that weren't found. Needed only if your browser "
+                    "reaches Lidarr at another address than this app does, e.g. https://lidarr.example.com.",
+                    fr="f-llink"),
               # swapped for selects once Lidarr has answered with its folders and profiles
               Div(profile_fields(s), hx_get="/ui/lidarr-options", hx_trigger="load", hx_swap="innerHTML")),
         test_footer("lidarr"))
@@ -64,7 +71,10 @@ def jellyfin_section(s: dict):
               field("User", Input(type="text", id="f-juser", name="jellyfin_user", value=s["jellyfin_user"],
                                   placeholder="First user"),
                     "The user whose library is searched and who owns the playlist. Empty = first user.",
-                    fr="f-juser")),
+                    fr="f-juser"),
+              switch("jellyfin_cover", "Use the YouTube cover as playlist image",
+                     "Set again only when the YouTube cover changes, so an image you pick in Jellyfin stays "
+                     "until then. Mixes have no cover.", flag(s["jellyfin_cover"]))),
         test_footer("jellyfin"))
 
 

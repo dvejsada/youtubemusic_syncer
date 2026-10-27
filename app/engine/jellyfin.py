@@ -1,13 +1,18 @@
 """Jellyfin: matching tracks against the library and maintaining the playlist (append-only or mirror)."""
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass, field
 
 from app.engine.cache import Cache
 from app.engine.common import _CHECK_TIMEOUT, _NOLOG, ApiError, EngineError, _base_url, _fatal, _redactor
-from app.engine.http import Http
+from app.engine.http import YOUTUBE_IMAGE_HOSTS, Http, fetch_image, url_allowed
 from app.engine.matching import DASH_SUFFIX, NOISE, norm, sim
 from app.engine.models import Settings, TrackResult
+
+COVER_MAX_BYTES = 5 * 1024 * 1024
+# where a playlist cover may be fetched from (module-level so tests can allow their http image server)
+COVER_HOSTS, COVER_SCHEMES = YOUTUBE_IMAGE_HOSTS, ("https",)
 
 
 @dataclass
@@ -103,6 +108,11 @@ class Jellyfin:
         for k in range(0, len(ids), 50):
             self.req("POST", f"/Playlists/{playlist_id}/Items",
                      params={"ids": ",".join(ids[k:k + 50]), "userId": self.uid})
+
+    def set_image(self, item_id: str, image: bytes, content_type: str) -> None:
+        """Make `image` the item's main image (Jellyfin takes it base64-encoded)."""
+        self.http.send("POST", f"/Items/{item_id}/Images/Primary", data=base64.b64encode(image),
+                       content_type=content_type)
 
     def _saved_playlist(self, playlist_id) -> list[dict] | None:
         """Entries of the playlist saved by an earlier sync, or None if it is gone (deleted in Jellyfin, or
@@ -304,6 +314,30 @@ def _sync_jellyfin(jf: Jellyfin, name: str, tracks: list[dict], results: list[Tr
         for t in missing:
             log(f"    - {', '.join(t['artists'])} - {t['title']}" + (f"  [{t['album']}]" if t['album'] else ""))
     return playlist_id, stats
+
+
+def _sync_cover(jf: Jellyfin, playlist_id: str, cover_url: str, cover_set: str, log, redact) -> str:
+    """Make the YouTube cover the Jellyfin playlist's image, unless `cover_set` (what an earlier sync set,
+    see SyncResult.jellyfin_cover_set) says it already is: an image chosen in Jellyfin stays until the YouTube
+    cover changes. Returns the new `cover_set`. Failures are logged and otherwise ignored (the playlist itself
+    is fine) and retried by the next sync."""
+    done = f"{jf.url}|{playlist_id}|{cover_url}"
+    if cover_set == done or not url_allowed(cover_url, COVER_HOSTS, COVER_SCHEMES):
+        return cover_set
+    if jf.dry:
+        log("  would set the playlist image to the YouTube cover")
+        return cover_set
+    try:
+        got = fetch_image(cover_url, max_bytes=COVER_MAX_BYTES)
+        if not got:
+            log("  !  could not download the YouTube cover, the playlist image is left as it is")
+            return cover_set
+        jf.set_image(playlist_id, *got)
+    except Exception as e:
+        log(f"  !  could not set the playlist image: {redact(e)}")
+        return cover_set
+    log("  set the playlist image to the YouTube cover")
+    return done
 
 
 def check_jellyfin(settings: Settings) -> tuple[bool, str]:

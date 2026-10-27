@@ -322,6 +322,9 @@ main:has(.empty) .sync-all { display: none; }  /* nothing to sync in the empty l
 .trk-status { display: grid; grid-template-rows: 1.5rem auto; align-content: start; align-items: center;
               justify-items: center; align-self: start; min-width: 0; }
 .trk-note { display: none; max-width: 100%; font-size: .72rem; }
+.trk-link { display: inline-flex; align-items: center; gap: .25rem; font-size: .72rem; line-height: 1.2; }
+.trk-link svg { width: .85rem; height: .85rem; }
+.trk-link .lbl { display: none; }
 .trk-head > :nth-child(n+5) { text-align: center; white-space: nowrap; font-size: .62rem; letter-spacing: .04em; }
 .trk .badge.compact { padding: .3rem; }
 .trk .badge.compact .lbl { display: none; }
@@ -344,7 +347,7 @@ main:has(.empty) .sync-all { display: none; }  /* nothing to sync in the empty l
   .trk-status { justify-items: start; }
   .trk-head > :nth-child(n+5) { text-align: left; font-size: inherit; letter-spacing: inherit; }
   .trk-note { display: block; }
-  .trk .badge.compact .lbl { display: inline; }
+  .trk .badge.compact .lbl, .trk-link .lbl { display: inline; }
 }
 
 /* ------------------------------------------------------------------ runs */

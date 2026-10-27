@@ -153,7 +153,7 @@ class TestDatabase:
         assert db.list_tracks(pl["id"])[0]["jellyfin_note"] == ""
         assert db.add_playlist("PLnew", "u", "New", 1, 24, cover_url="https://x/c")
         with db.connect() as c:
-            assert c.execute("PRAGMA user_version").fetchone()[0] == len(db.MIGRATIONS) == 6
+            assert c.execute("PRAGMA user_version").fetchone()[0] == len(db.MIGRATIONS) == 7
         db.init_db()  # idempotent
 
     def test_add_playlist_stores_the_cover_and_rows_expose_it(self):

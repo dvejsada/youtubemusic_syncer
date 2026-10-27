@@ -21,11 +21,12 @@ from fasthtml.common import APIRouter
 from starlette.responses import FileResponse, Response
 
 from app import db
+from app.engine.http import YOUTUBE_IMAGE_HOSTS, fetch_image, url_allowed
 
 ar = APIRouter()
 
 # Module-level so tests and the demo can patch them (host suffixes match "host" and "*.host").
-ALLOWED_HOSTS: tuple[str, ...] = ("googleusercontent.com", "ytimg.com", "ggpht.com")
+ALLOWED_HOSTS: tuple[str, ...] = YOUTUBE_IMAGE_HOSTS
 ALLOWED_SCHEMES: tuple[str, ...] = ("https",)
 
 MAX_BYTES = 2 * 1024 * 1024
@@ -43,16 +44,8 @@ _failed: dict[str, float] = {}  # url -> monotonic time of the last failure
 _failed_lock = threading.Lock()
 
 
-def _host_ok(host: str) -> bool:
-    return any(host == h or host.endswith("." + h) for h in ALLOWED_HOSTS)
-
-
 def is_allowed(url: str) -> bool:
-    try:
-        p = urlsplit(url)
-        return p.scheme in ALLOWED_SCHEMES and bool(p.hostname) and _host_ok(p.hostname.lower())
-    except ValueError:
-        return False
+    return url_allowed(url, ALLOWED_HOSTS, ALLOWED_SCHEMES)
 
 
 def resize(url: str, px: int) -> str:
@@ -88,20 +81,13 @@ def _download(url: str) -> Path | None:
     key = hashlib.sha1(url.encode()).hexdigest()
     tmp = _art_dir() / f"{key}.{uuid.uuid4().hex}.tmp"
     try:
-        # no redirects: a 3xx could lead off the allow-list
-        with requests.get(url, stream=True, timeout=FETCH_TIMEOUT, allow_redirects=False) as r:
-            ctype = r.headers.get("Content-Type", "").split(";")[0].strip().lower()
-            if r.status_code != 200 or ctype not in _EXT:
-                return None
-            size = 0
-            with open(tmp, "wb") as f:
-                for chunk in r.iter_content(64 * 1024):
-                    size += len(chunk)
-                    if size > MAX_BYTES:
-                        return None
-                    f.write(chunk)
-        if size == 0:
+        # fetch_image follows no redirects: a 3xx could lead off the allow-list
+        got = fetch_image(url, max_bytes=MAX_BYTES, timeout=FETCH_TIMEOUT, types=tuple(_EXT))
+        if got is None:
             return None
+        body, ctype = got
+        with open(tmp, "wb") as f:
+            f.write(body)
         final = _art_dir() / f"{key}.{_EXT[ctype]}"
         os.replace(tmp, final)
         return final

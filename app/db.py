@@ -13,6 +13,8 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from app.config import flag
+
 KEEP_RUNS = 30
 
 # setting key -> (env var used to seed it, default)
@@ -25,6 +27,8 @@ SETTING_DEFS: dict[str, tuple[str, str]] = {
     "jellyfin_url": ("JELLYFIN_URL", ""),
     "jellyfin_api_key": ("JELLYFIN_API_KEY", ""),
     "jellyfin_user": ("JELLYFIN_USER", ""),
+    "jellyfin_cover": ("JELLYFIN_COVER", "1"),
+    "lidarr_link_url": ("LIDARR_LINK_URL", ""),
     "default_interval_hours": ("DEFAULT_INTERVAL_HOURS", "24"),
     "finalize_timeout_min": ("FINALIZE_TIMEOUT_MIN", "20"),
 }
@@ -36,6 +40,7 @@ PLAYLIST_COLUMNS = {
     "do_jellyfin", "queued", "last_run_at", "next_run_at", "last_status", "last_error",
     "track_count", "lidarr_found", "jellyfin_matched", "jellyfin_playlist_id", "cover_url",
     "jellyfin_duplicates", "jellyfin_mirror", "full_recheck", "jellyfin_due_at", "jellyfin_due_try",
+    "jellyfin_cover_set",
 }
 
 SCHEMA_V1 = """
@@ -125,7 +130,12 @@ ALTER TABLE playlists ADD COLUMN jellyfin_due_at TEXT;
 ALTER TABLE playlists ADD COLUMN jellyfin_due_try INTEGER NOT NULL DEFAULT 0;
 """
 
-MIGRATIONS = [SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6]  # index + 1 == user_version after applying
+SCHEMA_V7 = """
+ALTER TABLE playlists ADD COLUMN jellyfin_cover_set TEXT NOT NULL DEFAULT '';
+"""
+
+# index + 1 == user_version after applying
+MIGRATIONS = [SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7]
 
 _init_lock = threading.Lock()
 
@@ -274,7 +284,8 @@ def engine_settings(overrides: dict[str, str] | None = None):
         lidarr_url=s["lidarr_url"], lidarr_api_key=s["lidarr_api_key"], lidarr_root=s["lidarr_root"],
         lidarr_quality=s["lidarr_quality"], lidarr_metadata=s["lidarr_metadata"],
         jellyfin_url=s["jellyfin_url"], jellyfin_api_key=s["jellyfin_api_key"],
-        jellyfin_user=s["jellyfin_user"], ytm_auth_path=str(auth) if auth.exists() else "",
+        jellyfin_user=s["jellyfin_user"], jellyfin_cover=flag(s["jellyfin_cover"]),
+        ytm_auth_path=str(auth) if auth.exists() else "",
         finalize_timeout_min=timeout)
 
 

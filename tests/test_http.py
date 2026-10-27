@@ -26,8 +26,8 @@ class Session:
         self.calls.append(("GET", url, params, timeout))
         return self.answers.pop(0)
 
-    def request(self, method, url, json=None, params=None, timeout=None):
-        self.calls.append((method, url, params, timeout))
+    def request(self, method, url, json=None, data=None, params=None, headers=None, timeout=None):
+        self.calls.append((method, url, params, timeout, data, headers))
         return self.answers.pop(0)
 
 
@@ -117,3 +117,42 @@ def test_lidarr_and_jellyfin_clients_are_set_up_as_intended():
     finally:
         lidarr.stop()
         jf.stop()
+
+
+def test_writes_can_send_a_raw_body_with_its_type(waits):
+    http = client(Resp(204, ""))
+    assert http.send("POST", "Items/1/Images/Primary", data=b"aGk=", content_type="image/png") == {}
+    assert http.s.calls[0][4:] == (b"aGk=", {"Content-Type": "image/png"})
+    http = client(Resp(200, "{}"))
+    http.send("POST", "x", json={"a": 1})
+    assert http.s.calls[0][5] is None   # JSON writes keep requests' own Content-Type
+
+
+def test_flag():
+    from app.config import flag
+    assert [flag(v) for v in ("1", "on", "yes", "True", " 1 ")] == [True] * 5
+    assert [flag(v) for v in ("", "0", "false", "No", "OFF", None)] == [False] * 6
+
+
+def test_url_allowed():
+    from app.engine.http import YOUTUBE_IMAGE_HOSTS, url_allowed
+    ok = ("https://lh3.googleusercontent.com/x=w544", "https://i.ytimg.com/vi/x/hq.jpg", "https://ggpht.com/a")
+    assert all(url_allowed(u, YOUTUBE_IMAGE_HOSTS, ("https",)) for u in ok)
+    bad = ("http://i.ytimg.com/a", "https://evilytimg.com/a", "https://ytimg.com.evil.net/a", "https://[::1/a",
+           "javascript:alert(1)", "")
+    assert not any(url_allowed(u, YOUTUBE_IMAGE_HOSTS, ("https",)) for u in bad)
+
+
+def test_fetch_image():
+    from mock_servers import MockImages
+    from app.engine.http import fetch_image
+    srv = MockImages().start()
+    try:
+        body, ctype = fetch_image(f"{srv.url}/cover", max_bytes=10 ** 6)
+        assert ctype == "image/png" and body == srv._png["/cover"]
+        for path in ("/missing", "/text", "/huge", "/redirect"):   # redirects are not followed
+            assert fetch_image(f"{srv.url}{path}", max_bytes=2 * 1024 * 1024) is None
+        assert fetch_image(f"{srv.url}/cover", max_bytes=10) is None
+        assert fetch_image(f"{srv.url}/cover", max_bytes=10 ** 6, types=("image/jpeg",)) is None
+    finally:
+        srv.stop()

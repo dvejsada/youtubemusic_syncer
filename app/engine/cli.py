@@ -38,6 +38,9 @@ def main(argv=None) -> int:
     p.add_argument("--dry-run", action="store_true", help="show what would happen, change nothing")
     p.add_argument("--mirror", action="store_true",
                    help="make the Jellyfin playlist match exactly: remove other songs and duplicates, restore the order")
+    p.add_argument("--cover", action="store_true",
+                   help="set the YouTube cover as the Jellyfin playlist image (the CLI keeps no record, so every "
+                        "run sets it again)")
     p.add_argument("--ytm-auth", default=base.ytm_auth_path)
     p.add_argument("--lidarr-url", default=base.lidarr_url)
     p.add_argument("--lidarr-key", default=base.lidarr_api_key)
@@ -55,7 +58,7 @@ def main(argv=None) -> int:
         lidarr_url=args.lidarr_url, lidarr_api_key=args.lidarr_key, lidarr_root=args.lidarr_root,
         lidarr_quality=args.lidarr_quality, lidarr_metadata=args.lidarr_metadata,
         jellyfin_url=args.jellyfin_url, jellyfin_api_key=args.jellyfin_key,
-        jellyfin_user=args.jellyfin_user, ytm_auth_path=args.ytm_auth,
+        jellyfin_user=args.jellyfin_user, jellyfin_cover=args.cover, ytm_auth_path=args.ytm_auth,
         finalize_timeout_min=args.finalize_timeout,
     )
     try:

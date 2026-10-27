@@ -543,6 +543,28 @@ class TestRobustness:
 
 
 class TestWorker:
+    def test_cover_is_set_once_also_across_full_rechecks_and_import_runs(self, client, servers, monkeypatch):
+        from mock_servers import MockImages
+        images = MockImages().start()
+        try:
+            monkeypatch.setattr(engine.jellyfin, "COVER_HOSTS", (images.host,))
+            monkeypatch.setattr(engine.jellyfin, "COVER_SCHEMES", ("http",))
+            fake_ytm(monkeypatch).playlists["PLroad"]["thumbnails"] = images.thumbs("cover-a")
+            pid = add_pl()
+            worker.run_pending_once()
+            pl = db.get_playlist(pid)
+            assert pl["jellyfin_cover_set"].endswith("/cover-a?s=120")
+            assert pl["jellyfin_playlist_id"] in servers.jf.images
+            servers.jf.images.clear()
+            db.update_playlist(pid, full_recheck=1, queued=1)   # the lookup cache starts empty: the image doesn't
+            worker.run_pending_once()
+            db.update_playlist(pid, jellyfin_due_at=db.now_iso())   # a Jellyfin-only run after a Lidarr import
+            worker.run_pending_once()
+            assert [r["trigger"] for r in db.list_runs(pid)][:2] == ["import", "manual"]
+            assert servers.jf.images == {} and db.get_playlist(pid)["full_recheck"] == 0
+        finally:
+            images.stop()
+
     def test_run_stores_tracks_and_run(self, client, servers, monkeypatch):
         fake_ytm(monkeypatch)
         pid = add_pl()
@@ -871,6 +893,17 @@ class TestDetail:
         t = client.get(f"/playlists/{synced}?tab=tracks&filter=jellyfin").text
         assert "One More Time" in t and ">Summer<" not in t
 
+    def test_tracks_not_found_in_lidarr_link_to_its_search(self, client, servers, synced):
+        page = client.get(f"/playlists/{synced}").text
+        assert page.count("/add/search?term=") == 1   # only "Where Is My Mind"
+        assert f'href="{servers.lidarr.url}/add/search?term=Nobody%20Nothing"' in page
+        db.set_settings({"lidarr_link_url": "https://lidarr.example.com/base"})
+        page = client.get(f"/playlists/{synced}").text
+        assert 'href="https://lidarr.example.com/base/add/search?term=Nobody%20Nothing"' in page
+        db.set_settings({"lidarr_link_url": "javascript:alert(1)"})
+        page = client.get(f"/playlists/{synced}").text
+        assert "/add/search" not in page and "javascript:" not in page
+
     def test_runs_tab(self, client, synced):
         r = client.get(f"/playlists/{synced}?tab=runs")
         assert r.status_code == 200
@@ -1152,6 +1185,25 @@ class TestSettings:
         assert (s["default_interval_hours"], s["finalize_timeout_min"], s["lidarr_root"]) == ("12", "30", "/music")
         assert "Settings saved" in client.get("/settings").text
         assert "Settings saved" not in client.get("/settings").text  # flash shows once
+
+    def test_jellyfin_cover_seed_accepts_words(self, monkeypatch):
+        with db.connect() as c:   # a fresh install: seeded from the environment on the first start
+            c.execute("DELETE FROM settings")
+        monkeypatch.setenv("JELLYFIN_COVER", "false")
+        db.init_db()
+        assert db.get_settings()["jellyfin_cover"] == "false" and db.engine_settings().jellyfin_cover is False
+
+    def test_cover_switch_and_lidarr_link_address(self, client, servers):
+        assert 'name="jellyfin_cover" checked' in client.get("/settings").text   # on by default
+        assert db.engine_settings().jellyfin_cover is True
+        form = {"lidarr_url": servers.lidarr.url, "default_interval_hours": "24", "finalize_timeout_min": "20"}
+        client.post("/settings", data={**form, "lidarr_link_url": "https://lidarr.example.com/ "})
+        s = db.get_settings()
+        assert (s["jellyfin_cover"], s["lidarr_link_url"]) == ("0", "https://lidarr.example.com")
+        assert db.engine_settings().jellyfin_cover is False
+        assert 'name="jellyfin_cover" checked' not in client.get("/settings").text
+        client.post("/settings", data={**form, "jellyfin_cover": "on"})
+        assert db.engine_settings().jellyfin_cover is True and db.get_settings()["lidarr_link_url"] == ""
 
     def test_new_key_replaces(self, client, servers):
         client.post("/settings", data={"lidarr_url": servers.lidarr.url, "lidarr_api_key": "new-key-999",
