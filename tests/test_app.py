@@ -1058,6 +1058,15 @@ class TestLidarrWebhook:
         after = {t["title"]: (t["lidarr_status"], t["lidarr_release"], t["lidarr_note"]) for t in db.list_tracks(synced)}
         assert {k: v[:2] for k, v in after.items() if k != "Brand New"} == before
         assert after["Brand New"] == ("pending", "", "new since the last full sync")
+
+    def test_new_track_is_skipped_for_lidarr_when_lidarr_is_off(self, client, hook, synced, monkeypatch):
+        db.update_playlist(synced, do_lidarr=0)
+        fake_ytm(monkeypatch).playlists["PLroad"]["tracks"].insert(0, yt_track("Brand New", ["Somebody"], "Fresh"))
+        client.post(hook, json=DISCOVERY_IMPORTED)
+        db.update_playlist(synced, jellyfin_due_at=db.iso_in_hours(-0.01))
+        worker.run_pending_once()
+        new = next(t for t in db.list_tracks(synced) if t["title"] == "Brand New")
+        assert (new["lidarr_status"], new["lidarr_note"]) == ("skipped", "")
         assert db.playlists_waiting_for("Daft Punk", "Discovery") == [synced]   # still found by the next import
 
     def test_interrupted_update_writes_nothing_and_resumes(self, client, hook, synced, monkeypatch):

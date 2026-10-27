@@ -33,8 +33,10 @@ class Jellyfin:
 
     def __init__(self, url, key, user, dry=False, log=_NOLOG):
         self.url = _base_url(url)
-        # only "busy" answers are retried: a 500 for one search is usually that search, not a busy server
-        self.http = Http(self.url, _auth_header(key), timeout=(self.CONNECT_TIMEOUT, 60), retry_on=(429, 502, 503, 504))
+        # only "busy" answers (e.g. a proxy while Jellyfin restarts) are retried, briefly: a 500 for one search is
+        # usually that search, and a Jellyfin that stays down shouldn't hold up a sync for long
+        self.http = Http(self.url, _auth_header(key), timeout=(self.CONNECT_TIMEOUT, 60),
+                         retry_on=(429, 502, 503, 504), backoff=1)
         self.dry = dry
         users = self.req("GET", "/Users")
         match = [u for u in users if not user or u["Name"].lower() == user.lower()]

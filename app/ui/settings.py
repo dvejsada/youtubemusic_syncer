@@ -138,7 +138,7 @@ def webhook_section(hook: tuple[str, str] | None, last: dict | None):
                     "and the password. (Appending ?token=<password> to the URL works too, but then it shows up in "
                     "access logs.)", cls="muted"),
               Small(seen, cls="muted")),
-        panel(Div(Form(btn("New URL", "refresh", "ghost", small=True, type="submit"),
+        panel(Div(Form(btn("New password", "refresh", "ghost", small=True, type="submit"),
                        action="/settings/webhook", method="post"),
                   Form(btn("Turn off", "trash", "ghost", small=True, type="submit"),
                        action="/settings/webhook/remove", method="post"), cls="row"), foot=True),
