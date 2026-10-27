@@ -87,6 +87,9 @@ cached in `data/art`, so the browser never loads anything from external hosts.
   playlist items, so the order is fixed by keeping the part of the playlist that is already right and removing
   and re-adding everything after it. The mirror is skipped for a sync in which any Jellyfin lookup failed or no
   track matched, so a hiccup never empties a playlist.
+* The YouTube playlist cover becomes the Jellyfin playlist's image (Settings, Jellyfin, on by default). It is
+  only set again when the YouTube cover changes, so an image you pick in Jellyfin stays until then. Mixes have
+  no cover. If the upload fails, the run log says so and the next sync tries again.
 
 ## Lidarr and Jellyfin notes
 
@@ -122,7 +125,9 @@ start failing. Public playlists and mixes keep syncing without the login if it e
   account that opened them; each sync reads the current contents. Tracks that disappear from a mix stay in
   the Jellyfin playlist unless Mirror in Jellyfin is on.
 * Tracks that are not on MusicBrainz / in Lidarr's metadata can't be downloaded automatically and show up
-  under "Not found in Lidarr"; add those manually.
+  under "Not found in Lidarr"; add those manually. Each has a *Search in Lidarr* link that opens Lidarr's
+  search for its artist and album. If your browser reaches Lidarr at another address than the app does (e.g.
+  the app uses `http://lidarr:8686` inside Docker), set *Address in your browser* in Settings, Lidarr.
 * Matching is heuristic. Remixes, live versions and very generic titles can occasionally pick the wrong release.
 * Deleting a playlist in the app removes only its records here, not the Jellyfin playlist or Lidarr albums.
 * There is one password (or your reverse proxy's sign-in, see below). Cross-site requests are refused: a

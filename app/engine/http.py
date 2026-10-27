@@ -41,15 +41,37 @@ class Http:
             raise ApiError(f"GET {path} -> {r.status_code} {r.reason or ''}".rstrip(), r.status_code)
         return r.json()
 
-    def send(self, method: str, path: str, *, json=None, params: dict | None = None, timeout=None):
-        """The JSON answer, {} for an empty one. Errors include the start of the body (Lidarr explains
-        rejected writes there)."""
+    def send(self, method: str, path: str, *, json=None, data=None, content_type: str = "",
+             params: dict | None = None, timeout=None):
+        """The JSON answer, {} for an empty one. `data` is sent as the body as it is, with `content_type`.
+        Errors include the start of the body (Lidarr explains rejected writes there)."""
         if self.before:
             self.before()
-        r = self.s.request(method, self._url(path), json=json, params=params, timeout=timeout or self.timeout)
+        r = self.s.request(method, self._url(path), json=json, data=data, params=params,
+                           headers={"Content-Type": content_type} if content_type else None,
+                           timeout=timeout or self.timeout)
         if not r.ok:
             raise ApiError(f"{method} {path} -> {r.status_code}: {r.text[:300]}", r.status_code)
         return r.json() if r.text else {}
 
     def _url(self, path: str) -> str:
         return f"{self.base}/{path.lstrip('/')}"
+
+
+IMAGE_TYPES = ("image/jpeg", "image/png", "image/webp", "image/gif", "image/avif")
+
+
+def fetch_image(url: str, *, max_bytes: int, timeout=(5, 10), types=IMAGE_TYPES) -> tuple[bytes, str] | None:
+    """(body, content type) of the image at `url`, or None unless the answer is a 200 with one of `types` and
+    1 to `max_bytes` bytes. Redirects are not followed (they could lead anywhere); a connection problem raises
+    requests.RequestException."""
+    with requests.get(url, stream=True, timeout=timeout, allow_redirects=False) as r:
+        ctype = r.headers.get("Content-Type", "").split(";")[0].strip().lower()
+        if r.status_code != 200 or ctype not in types:
+            return None
+        body = bytearray()
+        for chunk in r.iter_content(64 * 1024):
+            body += chunk
+            if len(body) > max_bytes:
+                return None
+    return (bytes(body), ctype) if body else None

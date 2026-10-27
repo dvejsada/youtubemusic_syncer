@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from app.engine.cache import Cache
 from app.engine.common import _fatal, _redactor
-from app.engine.jellyfin import Jellyfin, _sync_jellyfin
+from app.engine.jellyfin import Jellyfin, _sync_cover, _sync_jellyfin
 from app.engine.lidarr import Lidarr, _sync_lidarr
 from app.engine.models import EngineError, Settings, SyncResult, TrackResult
 from app.engine.ytm import read_playlist_full
@@ -70,6 +70,8 @@ def sync_playlist(settings: Settings, ref: str, *, jellyfin_name: str | None = N
         res.jellyfin_removed, res.jellyfin_moved = jf_stats.get("removed", 0), jf_stats.get("moved", 0)
         res.jellyfin_lookup_errors = jf_stats.get("lookup_errors", 0)
         stopped = stopped or should_stop()
+        if settings.jellyfin_cover and cover and res.jellyfin_playlist_id and not stopped:
+            _sync_cover(jf, res.jellyfin_playlist_id, cover, cache, say, redact)
     elif not do_jellyfin:
         for tr in results:
             tr.jellyfin_status = "skipped"

@@ -1,6 +1,8 @@
 """Playlist components: library grid, sidebar list, add form and the playlist detail page (hero, tracks, runs)."""
 from __future__ import annotations
 
+from urllib.parse import quote
+
 from fasthtml.common import (A, Details, Div, Fieldset, Form, H1, Input, Pre, Progress, Section, Small, Span, Strong,
                              Summary)
 from fasthtml.pico import Group
@@ -238,15 +240,32 @@ def tabs(pid: int, current: str, counts: dict):
                role="navigation", aria_label="Playlist sections")
 
 
-def _status_cell(table: dict, status: str, release: str = "", note: str = "", noted=LIDARR_MISSING):
+def _status_cell(table: dict, status: str, release: str = "", note: str = "", noted=LIDARR_MISSING, extra=None):
     tone, label, ico = table.get(status, ("neutral", status or "-", "minus"))
     detail = " · ".join(x for x in (release, note) if x)
     return Div(badge(tone, label, ico, compact=True, title=f"{label}: {detail}" if detail else label),
                Small(note, cls="trk-note", title=note) if note and status in noted else None,
-               cls="trk-status")
+               extra, cls="trk-status")
 
 
-def tracks_panel(pid: int, tracks: list[dict], flt: str):
+def lidarr_search_url(base: str, t: dict) -> str:
+    """Lidarr's add page, searching for the track's artist and album; '' without an http(s) Lidarr address."""
+    if not base.lower().startswith(("http://", "https://")):
+        return ""
+    term = " ".join(x for x in ((t["artists"] or [""])[0], t["album"] or "") if x) or t["title"]
+    return f"{base.rstrip('/')}/add/search?term={quote(term, safe='')}"
+
+
+def _lidarr_link(base: str, t: dict):
+    url = t["lidarr_status"] in LIDARR_MISSING and lidarr_search_url(base, t)
+    if not url:
+        return None
+    return A(icon("external"), Span("Search in Lidarr", cls="lbl"), href=url, target="_blank",
+             rel="noopener noreferrer", title="Search in Lidarr", aria_label="Search in Lidarr", cls="trk-link")
+
+
+def tracks_panel(pid: int, tracks: list[dict], flt: str, lidarr_link: str = ""):
+    """`lidarr_link`: the Lidarr address for the Search in Lidarr links of tracks that weren't found."""
     filters = {"all": ("All", lambda t: True),
                "lidarr": ("Not found in Lidarr", lambda t: t["lidarr_status"] in LIDARR_MISSING),
                "jellyfin": ("Not in Jellyfin yet", lambda t: t["jellyfin_status"] == "missing")}
@@ -260,7 +279,8 @@ def tracks_panel(pid: int, tracks: list[dict], flt: str):
                 Div(Strong(t["title"], cls="trk-title"), Small(", ".join(t["artists"]), cls="trk-artist"),
                     cls="trk-main"),
                 Span(t["album"] or "", cls="trk-album"),
-                _status_cell(LIDARR_BADGES, t["lidarr_status"], t["lidarr_release"], t["lidarr_note"]),
+                _status_cell(LIDARR_BADGES, t["lidarr_status"], t["lidarr_release"], t["lidarr_note"],
+                             extra=_lidarr_link(lidarr_link, t)),
                 _status_cell(JELLYFIN_BADGES, t["jellyfin_status"], note=t["jellyfin_note"], noted=("duplicate",)),
                 cls="trk")
             for t in shown] or [Div("Nothing matches this filter.", cls="center muted pad")]

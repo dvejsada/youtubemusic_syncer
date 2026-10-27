@@ -219,7 +219,9 @@ def detail(pid: int, tab: str = "tracks", filter: str = "all"):
     tab = tab if tab in ("tracks", "runs", "settings") else "tracks"
     runs = db.list_runs(pid)
     if tab == "tracks":
-        panel = ui.tracks_panel(pid, db.list_tracks(pid), filter if filter in ("lidarr", "jellyfin") else "all")
+        s = db.get_settings()
+        panel = ui.tracks_panel(pid, db.list_tracks(pid), filter if filter in ("lidarr", "jellyfin") else "all",
+                                s["lidarr_link_url"] or s["lidarr_url"])
     elif tab == "runs":
         panel = ui.runs_panel(runs)
     else:

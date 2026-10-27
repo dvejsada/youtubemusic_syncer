@@ -9,6 +9,7 @@ stubs for the two things that are unreachable from tests: YouTube Music and Musi
 """
 from __future__ import annotations
 
+import base64
 import colorsys
 import hashlib
 import json
@@ -49,7 +50,7 @@ class _Server:
                 try:
                     body = json.loads(raw) if raw else None
                 except ValueError:
-                    body = None
+                    body = raw  # not JSON (e.g. an uploaded image): the bytes as sent
                 query = {k: v[0] for k, v in parse_qs(u.query).items()}
                 with outer.lock:
                     outer.requests.append((method, self.path))
@@ -261,6 +262,8 @@ class MockJellyfin(_Server):
         self.fail_playlist_writes = False   # make POST /Playlists... answer 500
         self.drop_playlist_appends = False  # answer POST /Playlists/{id}/Items with 204 but keep nothing
         self.fail_search_terms: set[str] = set()  # /Items searches for these (lowercase) terms answer 500
+        self.images: dict[str, tuple[str, bytes]] = {}  # item id -> (content type, image) of POST .../Images/Primary
+        self.fail_images = False  # make image uploads answer 500
         self._n = 0
 
     def add_item(self, item_id, name, artist, album=None):
@@ -297,6 +300,17 @@ class MockJellyfin(_Server):
             pid = f"pl{self._n}"
             self.playlists[pid] = {"Id": pid, "Name": body["Name"], "items": list(body.get("Ids", []))}
             return 200, {"Id": pid}
+        m = re.fullmatch(r"/Items/([^/]+)/Images/Primary", path)
+        if m and method == "POST":  # like Jellyfin: the body is the image, base64-encoded
+            if self.fail_images:
+                return 500, {"error": "boom"}
+            if m.group(1) not in self.playlists:
+                return 404, {}
+            ctype = headers.get("Content-Type", "")
+            if not ctype.startswith("image/") or not isinstance(body, bytes):
+                return 400, "Incorrect ContentType."
+            self.images[m.group(1)] = (ctype, base64.b64decode(body, validate=True))
+            return 204, {}
         m = re.fullmatch(r"/Playlists/([^/]+)/Items", path)
         if m and m.group(1) in self.playlists:
             pl = self.playlists[m.group(1)]

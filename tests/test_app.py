@@ -871,6 +871,17 @@ class TestDetail:
         t = client.get(f"/playlists/{synced}?tab=tracks&filter=jellyfin").text
         assert "One More Time" in t and ">Summer<" not in t
 
+    def test_tracks_not_found_in_lidarr_link_to_its_search(self, client, servers, synced):
+        page = client.get(f"/playlists/{synced}").text
+        assert page.count("/add/search?term=") == 1   # only "Where Is My Mind"
+        assert f'href="{servers.lidarr.url}/add/search?term=Nobody%20Nothing"' in page
+        db.set_settings({"lidarr_link_url": "https://lidarr.example.com/base"})
+        page = client.get(f"/playlists/{synced}").text
+        assert 'href="https://lidarr.example.com/base/add/search?term=Nobody%20Nothing"' in page
+        db.set_settings({"lidarr_link_url": "javascript:alert(1)"})
+        page = client.get(f"/playlists/{synced}").text
+        assert "/add/search" not in page and "javascript:" not in page
+
     def test_runs_tab(self, client, synced):
         r = client.get(f"/playlists/{synced}?tab=runs")
         assert r.status_code == 200
@@ -1152,6 +1163,18 @@ class TestSettings:
         assert (s["default_interval_hours"], s["finalize_timeout_min"], s["lidarr_root"]) == ("12", "30", "/music")
         assert "Settings saved" in client.get("/settings").text
         assert "Settings saved" not in client.get("/settings").text  # flash shows once
+
+    def test_cover_switch_and_lidarr_link_address(self, client, servers):
+        assert 'name="jellyfin_cover" checked' in client.get("/settings").text   # on by default
+        assert db.engine_settings().jellyfin_cover is True
+        form = {"lidarr_url": servers.lidarr.url, "default_interval_hours": "24", "finalize_timeout_min": "20"}
+        client.post("/settings", data={**form, "lidarr_link_url": "https://lidarr.example.com/ "})
+        s = db.get_settings()
+        assert (s["jellyfin_cover"], s["lidarr_link_url"]) == ("0", "https://lidarr.example.com")
+        assert db.engine_settings().jellyfin_cover is False
+        assert 'name="jellyfin_cover" checked' not in client.get("/settings").text
+        client.post("/settings", data={**form, "jellyfin_cover": "on"})
+        assert db.engine_settings().jellyfin_cover is True and db.get_settings()["lidarr_link_url"] == ""
 
     def test_new_key_replaces(self, client, servers):
         client.post("/settings", data={"lidarr_url": servers.lidarr.url, "lidarr_api_key": "new-key-999",

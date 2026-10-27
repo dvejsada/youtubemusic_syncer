@@ -25,6 +25,8 @@ SETTING_DEFS: dict[str, tuple[str, str]] = {
     "jellyfin_url": ("JELLYFIN_URL", ""),
     "jellyfin_api_key": ("JELLYFIN_API_KEY", ""),
     "jellyfin_user": ("JELLYFIN_USER", ""),
+    "jellyfin_cover": ("JELLYFIN_COVER", "1"),
+    "lidarr_link_url": ("LIDARR_LINK_URL", ""),
     "default_interval_hours": ("DEFAULT_INTERVAL_HOURS", "24"),
     "finalize_timeout_min": ("FINALIZE_TIMEOUT_MIN", "20"),
 }
@@ -274,7 +276,8 @@ def engine_settings(overrides: dict[str, str] | None = None):
         lidarr_url=s["lidarr_url"], lidarr_api_key=s["lidarr_api_key"], lidarr_root=s["lidarr_root"],
         lidarr_quality=s["lidarr_quality"], lidarr_metadata=s["lidarr_metadata"],
         jellyfin_url=s["jellyfin_url"], jellyfin_api_key=s["jellyfin_api_key"],
-        jellyfin_user=s["jellyfin_user"], ytm_auth_path=str(auth) if auth.exists() else "",
+        jellyfin_user=s["jellyfin_user"], jellyfin_cover=s["jellyfin_cover"] not in ("", "0"),
+        ytm_auth_path=str(auth) if auth.exists() else "",
         finalize_timeout_min=timeout)
 
 

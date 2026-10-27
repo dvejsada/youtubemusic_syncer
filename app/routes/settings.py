@@ -41,10 +41,11 @@ def _key_overrides(lidarr_api_key: str, jellyfin_api_key: str) -> dict:
 def settings_save(session, lidarr_url: str = "", lidarr_api_key: str = "", lidarr_root: str = "",
                   lidarr_quality: str = "", lidarr_metadata: str = "", jellyfin_url: str = "",
                   jellyfin_api_key: str = "", jellyfin_user: str = "", default_interval_hours: int = 24,
-                  finalize_timeout_min: int = 20):
+                  finalize_timeout_min: int = 20, lidarr_link_url: str = "", jellyfin_cover: bool = False):
     db.set_settings({
         "lidarr_url": clean_url(lidarr_url), "lidarr_root": lidarr_root, "lidarr_quality": lidarr_quality,
         "lidarr_metadata": lidarr_metadata, "jellyfin_url": clean_url(jellyfin_url), "jellyfin_user": jellyfin_user,
+        "lidarr_link_url": clean_url(lidarr_link_url), "jellyfin_cover": "1" if jellyfin_cover else "0",
         "default_interval_hours": str(clamp_interval(default_interval_hours)),
         "finalize_timeout_min": str(clamp(finalize_timeout_min, 1, MAX_FINALIZE_MIN)),
         **_key_overrides(lidarr_api_key, jellyfin_api_key),

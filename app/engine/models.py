@@ -19,6 +19,7 @@ class Settings:
     jellyfin_url: str = ""
     jellyfin_api_key: str = ""
     jellyfin_user: str = ""
+    jellyfin_cover: bool = True  # the YouTube cover becomes the Jellyfin playlist's image
     ytm_auth_path: str = ""      # optional browser.json for private playlists
     finalize_timeout_min: int = 20
 
